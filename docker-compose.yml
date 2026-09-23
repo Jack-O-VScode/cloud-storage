@@ -9,7 +9,7 @@ services:
       - MAX_UPLOAD_BYTES=${MAX_UPLOAD_BYTES:-21474836480}
       - FORCE_HTTPS=${FORCE_HTTPS:-false}
     volumes:
-      # Point this at the microSD mount (or a USB drive mounted on the Pi)
-      # so all uploaded files and metadata live there, not on the OS SD
-      # partition.
+      # Point this at whatever disk/volume should hold uploaded files and
+      # metadata (a mounted block volume, a USB drive, etc), not the OS
+      # boot partition.
       - ${DATA_DIR:-./data}:/app/server/data

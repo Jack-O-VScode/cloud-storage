@@ -1,0 +1,35 @@
+
+# Optional overlay that puts Caddy in front of the app for automatic HTTPS.
+# Use this when the server has a public IP (e.g. a cloud VM), so traffic
+# isn't sent over plain HTTP across the internet. Not needed for a home
+# server reached only over your LAN or a private overlay network (Tailscale).
+#
+# Usage: docker compose -f docker-compose.yml -f docker-compose.proxy.yml up -d --build
+services:
+  cloud-storage:
+    # !override replaces the base file's port mapping instead of merging
+    # with it - without this the app would stay reachable on the public
+    # interface too, defeating the point of putting Caddy in front of it.
+    ports: !override
+      - '127.0.0.1:${HOST_PORT:-3000}:3000'
+    environment:
+      - FORCE_HTTPS=true
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+    environment:
+      - DOMAIN=${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - cloud-storage
+
+volumes:
+  caddy_data:
+  caddy_config:
