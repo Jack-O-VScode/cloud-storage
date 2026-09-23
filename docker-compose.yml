@@ -1,0 +1,15 @@
+services:
+  cloud-storage:
+    build: .
+    restart: unless-stopped
+    ports:
+      - '${HOST_PORT:-3000}:3000'
+    environment:
+      - JWT_SECRET=${JWT_SECRET}
+      - MAX_UPLOAD_BYTES=${MAX_UPLOAD_BYTES:-21474836480}
+      - FORCE_HTTPS=${FORCE_HTTPS:-false}
+    volumes:
+      # Point this at the microSD mount (or a USB drive mounted on the Pi)
+      # so all uploaded files and metadata live there, not on the OS SD
+      # partition.
+      - ${DATA_DIR:-./data}:/app/server/data
