@@ -523,6 +523,17 @@ button {
   padding: 8px 0;
   border-bottom: 1px solid var(--border);
 }
+.quota-edit-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+.quota-input {
+  width: 90px;
+  margin-bottom: 0;
+  padding: 5px 8px;
+}
 .new-user-form {
   display: flex;
   flex-direction: column;

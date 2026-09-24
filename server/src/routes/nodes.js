@@ -7,7 +7,7 @@ import multer from 'multer';
 import mime from 'mime-types';
 const uuid = crypto.randomUUID;
 import { config } from '../config.js';
-import { getState, save, findNodeById, childrenOf, allOwnedBy } from '../store.js';
+import { getState, save, findNodeById, findUserById, childrenOf, allOwnedBy } from '../store.js';
 import { requireAuth, requireFetchHeader, hashPassword } from '../auth.js';
 import { blobPath, diskUsage } from '../lib/paths.js';
 import { breadcrumb, isSelfOrDescendantMove, descendantsOf } from '../lib/tree.js';
@@ -192,6 +192,20 @@ router.post('/upload', requireFetchHeader, requireAuth, upload.array('files'), a
     // Clean up anything multer already wrote to disk before we reject.
     await Promise.all((req.files || []).map((f) => fsp.unlink(f.path).catch(() => {})));
     return;
+  }
+
+  const quotaBytes = findUserById(req.user.id)?.quotaBytes;
+  if (quotaBytes) {
+    const incomingBytes = (req.files || []).reduce((sum, f) => sum + f.size, 0);
+    const currentlyUsed = allOwnedBy(req.user.id)
+      .filter((n) => n.type === 'file' && !n.trashed)
+      .reduce((sum, n) => sum + (n.size || 0), 0);
+    if (currentlyUsed + incomingBytes > quotaBytes) {
+      await Promise.all((req.files || []).map((f) => fsp.unlink(f.path).catch(() => {})));
+      return res.status(413).json({
+        error: `This upload would exceed your storage quota (${(quotaBytes / 1e9).toFixed(1)}GB). Free up space or ask an admin to raise your quota.`,
+      });
+    }
   }
 
   // Optional JSON array of relative paths (e.g. "Photos/2024/img.jpg"),

@@ -10,7 +10,22 @@ function publicUser(u) {
   const used = allOwnedBy(u.id)
     .filter((n) => n.type === 'file' && !n.trashed)
     .reduce((sum, n) => sum + (n.size || 0), 0);
-  return { id: u.id, username: u.username, isAdmin: u.isAdmin, createdAt: u.createdAt, bytesUsed: used };
+  return {
+    id: u.id,
+    username: u.username,
+    isAdmin: u.isAdmin,
+    createdAt: u.createdAt,
+    bytesUsed: used,
+    quotaBytes: u.quotaBytes || null,
+  };
+}
+
+// null/0 means unlimited; anything else must be a positive integer.
+function parseQuotaBytes(raw) {
+  if (raw === null || raw === undefined || raw === 0) return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return undefined; // invalid
+  return Math.floor(n);
 }
 
 router.get('/', requireAuth, requireAdmin, (req, res) => {
@@ -18,12 +33,16 @@ router.get('/', requireAuth, requireAdmin, (req, res) => {
 });
 
 router.post('/', requireFetchHeader, requireAuth, requireAdmin, (req, res) => {
-  const { username, password, isAdmin } = req.body || {};
+  const { username, password, isAdmin, quotaBytes } = req.body || {};
   if (!username || !password || password.length < 8) {
     return res.status(400).json({ error: 'Username and an 8+ character password are required' });
   }
   if (findUserByUsername(username)) {
     return res.status(400).json({ error: 'That username is already taken' });
+  }
+  const parsedQuota = parseQuotaBytes(quotaBytes);
+  if (parsedQuota === undefined) {
+    return res.status(400).json({ error: 'Quota must be a positive number, or left blank for unlimited' });
   }
   const state = getState();
   const user = {
@@ -32,10 +51,27 @@ router.post('/', requireFetchHeader, requireAuth, requireAdmin, (req, res) => {
     passwordHash: hashPassword(password),
     isAdmin: Boolean(isAdmin),
     createdAt: Date.now(),
+    quotaBytes: parsedQuota,
   };
   state.users.push(user);
   save();
   res.status(201).json({ user: publicUser(user) });
+});
+
+router.patch('/:id', requireFetchHeader, requireAuth, requireAdmin, (req, res) => {
+  const state = getState();
+  const user = state.users.find((u) => u.id === req.params.id);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  const { quotaBytes } = req.body || {};
+  if (quotaBytes !== undefined) {
+    const parsedQuota = parseQuotaBytes(quotaBytes);
+    if (parsedQuota === undefined) {
+      return res.status(400).json({ error: 'Quota must be a positive number, or left blank for unlimited' });
+    }
+    user.quotaBytes = parsedQuota;
+  }
+  save();
+  res.json({ user: publicUser(user) });
 });
 
 router.delete('/:id', requireFetchHeader, requireAuth, requireAdmin, (req, res) => {

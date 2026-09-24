@@ -36,8 +36,9 @@ export const api = {
   me: () => request('/auth/me'),
 
   listUsers: () => request('/users'),
-  createUser: (username, password, isAdmin) =>
-    request('/users', { method: 'POST', body: { username, password, isAdmin } }),
+  createUser: (username, password, isAdmin, quotaBytes) =>
+    request('/users', { method: 'POST', body: { username, password, isAdmin, quotaBytes } }),
+  updateUserQuota: (id, quotaBytes) => request(`/users/${id}`, { method: 'PATCH', body: { quotaBytes } }),
   deleteUser: (id) => request(`/users/${id}`, { method: 'DELETE' }),
 
   listNodes: (parentId) => request(`/nodes?parentId=${encodeURIComponent(parentId)}`),

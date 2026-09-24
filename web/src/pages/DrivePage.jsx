@@ -270,15 +270,25 @@ export default function DrivePage() {
               <div
                 className="usage-bar-fill"
                 style={{
-                  width: usage.disk?.total
+                  width: usage.quotaBytes
+                    ? `${Math.min(100, (usage.bytesUsed / usage.quotaBytes) * 100)}%`
+                    : usage.disk?.total
                     ? `${Math.min(100, (usage.disk.used / usage.disk.total) * 100)}%`
                     : '0%',
                 }}
               />
             </div>
             <div className="muted small">
-              {formatBytes(usage.bytesUsed)} used by you
-              {usage.disk?.total && <> · {formatBytes(usage.disk.free)} free on disk</>}
+              {usage.quotaBytes ? (
+                <>
+                  {formatBytes(usage.bytesUsed)} of {formatBytes(usage.quotaBytes)} used
+                </>
+              ) : (
+                <>
+                  {formatBytes(usage.bytesUsed)} used by you
+                  {usage.disk?.total && <> · {formatBytes(usage.disk.free)} free on disk</>}
+                </>
+              )}
             </div>
           </div>
         )}
