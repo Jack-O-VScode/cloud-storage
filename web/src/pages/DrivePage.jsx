@@ -9,6 +9,7 @@ import ShareModal from '../components/ShareModal.jsx';
 import UsersAdminModal from '../components/UsersAdminModal.jsx';
 import { ConfirmDialog } from '../components/Modal.jsx';
 import { formatBytes } from '../utils/format.js';
+import { filesToEntries, collectFilesFromDataTransfer } from '../utils/collectFiles.js';
 
 export default function DrivePage() {
   const { user, logout } = useAuth();
@@ -26,6 +27,7 @@ export default function DrivePage() {
 
   const [modal, setModal] = useState(null); // { type, node? }
   const fileInputRef = useRef(null);
+  const folderInputRef = useRef(null);
   const dragCounter = useRef(0);
 
   const refresh = useCallback(async () => {
@@ -83,13 +85,18 @@ export default function DrivePage() {
     }
   };
 
-  const doUpload = async (fileList) => {
-    const files = Array.from(fileList);
-    if (files.length === 0) return;
+  // `entries` is [{file, relativePath}] - relativePath is empty for a flat
+  // file upload, or e.g. "Photos/2024/img.jpg" when uploading a folder, so
+  // the server can recreate the folder structure instead of flattening it.
+  const doUploadEntries = async (entries) => {
+    if (entries.length === 0) return;
     setUploadPct(0);
     try {
-      await uploadFiles(files, parentId, (p) => setUploadPct(p));
-      toast.push(`Uploaded ${files.length} file${files.length > 1 ? 's' : ''}`, 'success');
+      const files = entries.map((e) => e.file);
+      const relativePaths = entries.map((e) => e.relativePath || '');
+      const hasPaths = relativePaths.some(Boolean);
+      await uploadFiles(files, parentId, (p) => setUploadPct(p), hasPaths ? relativePaths : undefined);
+      toast.push(`Uploaded ${files.length} item${files.length > 1 ? 's' : ''}`, 'success');
       refresh();
       refreshUsage();
     } catch (err) {
@@ -99,7 +106,7 @@ export default function DrivePage() {
     }
   };
 
-  // Drag-and-drop upload anywhere over the content area.
+  // Drag-and-drop upload (files or whole folders) anywhere over the content area.
   const onDragEnter = (e) => {
     e.preventDefault();
     if (view !== 'browse') return;
@@ -112,12 +119,13 @@ export default function DrivePage() {
     if (dragCounter.current <= 0) setDragActive(false);
   };
   const onDragOver = (e) => e.preventDefault();
-  const onDrop = (e) => {
+  const onDrop = async (e) => {
     e.preventDefault();
     dragCounter.current = 0;
     setDragActive(false);
     if (view !== 'browse') return;
-    if (e.dataTransfer.files?.length) doUpload(e.dataTransfer.files);
+    const entries = await collectFilesFromDataTransfer(e.dataTransfer);
+    if (entries.length) doUploadEntries(entries);
   };
 
   const actions = {
@@ -164,13 +172,35 @@ export default function DrivePage() {
         <button className="btn btn-block" onClick={() => fileInputRef.current?.click()}>
           Upload files
         </button>
+        <button className="btn btn-block" onClick={() => folderInputRef.current?.click()}>
+          Upload folder
+        </button>
         <input
           ref={fileInputRef}
           type="file"
           multiple
           style={{ display: 'none' }}
           onChange={(e) => {
-            doUpload(e.target.files);
+            doUploadEntries(filesToEntries(e.target.files));
+            e.target.value = '';
+          }}
+        />
+        <input
+          ref={(el) => {
+            folderInputRef.current = el;
+            // webkitdirectory/directory aren't recognized JSX props, so set
+            // them imperatively - this is what puts the browser's file
+            // picker into folder-selection mode.
+            if (el) {
+              el.setAttribute('webkitdirectory', '');
+              el.setAttribute('directory', '');
+            }
+          }}
+          type="file"
+          multiple
+          style={{ display: 'none' }}
+          onChange={(e) => {
+            doUploadEntries(filesToEntries(e.target.files));
             e.target.value = '';
           }}
         />

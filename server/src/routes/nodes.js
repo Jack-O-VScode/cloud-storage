@@ -123,22 +123,90 @@ const upload = multer({
   limits: { fileSize: config.maxUploadBytes },
 });
 
-router.post('/upload', requireFetchHeader, requireAuth, upload.array('files', 50), async (req, res) => {
+// Resolves (creating as needed) the chain of subfolders described by
+// `segments` under `baseParentId`, reusing folders already created earlier
+// in the same upload batch (via `cache`) so a folder with many files isn't
+// recreated once per file.
+function resolveFolderChain(ownerId, baseParentId, segments, cache) {
+  let parentId = baseParentId;
+  for (const name of segments) {
+    const cacheKey = `${parentId ?? 'root'}\u0000${name}`;
+    const cached = cache.get(cacheKey);
+    if (cached) {
+      parentId = cached;
+      continue;
+    }
+    const state = getState();
+    let folder = state.nodes.find(
+      (n) =>
+        n.ownerId === ownerId &&
+        n.parentId === parentId &&
+        n.type === 'folder' &&
+        !n.trashed &&
+        n.name === name
+    );
+    if (!folder) {
+      const now = Date.now();
+      folder = {
+        id: uuid(),
+        name,
+        type: 'folder',
+        parentId,
+        ownerId,
+        trashed: false,
+        trashedAt: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      state.nodes.push(folder);
+    }
+    cache.set(cacheKey, folder.id);
+    parentId = folder.id;
+  }
+  return parentId;
+}
+
+router.post('/upload', requireFetchHeader, requireAuth, upload.array('files', 300), async (req, res) => {
   const parentId = fromClientParentId(req.body?.parentId);
   if (!assertParentIsUsableFolder(req, res, parentId)) {
     // Clean up anything multer already wrote to disk before we reject.
     await Promise.all((req.files || []).map((f) => fsp.unlink(f.path).catch(() => {})));
     return;
   }
+
+  // Optional JSON array of relative paths (e.g. "Photos/2024/img.jpg"),
+  // one per uploaded file in the same order, sent when uploading a folder
+  // (drag-and-drop or the folder picker) so its structure can be recreated
+  // as real subfolders instead of dumping every file flat into parentId.
+  let relativePaths = [];
+  if (req.body?.relativePaths) {
+    try {
+      relativePaths = JSON.parse(req.body.relativePaths);
+    } catch {
+      relativePaths = [];
+    }
+  }
+
   const state = getState();
   const now = Date.now();
   const created = [];
-  for (const file of req.files || []) {
+  const folderCache = new Map();
+
+  (req.files || []).forEach((file, i) => {
+    let targetParentId = parentId;
+    const relPath = relativePaths[i];
+    if (relPath) {
+      const segments = relPath.split('/').filter(Boolean);
+      segments.pop(); // last segment is the filename itself, not a folder
+      if (segments.length) {
+        targetParentId = resolveFolderChain(req.user.id, parentId, segments, folderCache);
+      }
+    }
     const node = {
       id: uuid(),
       name: file.originalname,
       type: 'file',
-      parentId,
+      parentId: targetParentId,
       ownerId: req.user.id,
       size: file.size,
       mimeType: file.mimetype || mime.lookup(file.originalname) || 'application/octet-stream',
@@ -150,7 +218,8 @@ router.post('/upload', requireFetchHeader, requireAuth, upload.array('files', 50
     };
     state.nodes.push(node);
     created.push(node);
-  }
+  });
+
   await save();
   res.status(201).json({ items: created.map(serialize) });
 });

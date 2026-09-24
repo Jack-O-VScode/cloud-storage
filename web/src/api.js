@@ -58,11 +58,14 @@ export const api = {
 };
 
 // XHR (not fetch) so we get upload progress events.
-export function uploadFiles(files, parentId, onProgress) {
+// `relativePaths`, when given, must be the same length/order as `files` -
+// used to recreate a folder's structure server-side instead of flattening it.
+export function uploadFiles(files, parentId, onProgress, relativePaths) {
   return new Promise((resolve, reject) => {
     const form = new FormData();
     form.append('parentId', parentId);
     for (const file of files) form.append('files', file, file.name);
+    if (relativePaths) form.append('relativePaths', JSON.stringify(relativePaths));
 
     const xhr = new XMLHttpRequest();
     xhr.open('POST', BASE + '/nodes/upload');
