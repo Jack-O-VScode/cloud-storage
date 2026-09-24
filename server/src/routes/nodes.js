@@ -120,7 +120,15 @@ const upload = multer({
     destination: (req, file, cb) => cb(null, config.blobDir),
     filename: (req, file, cb) => cb(null, uuid()),
   }),
-  limits: { fileSize: config.maxUploadBytes },
+  limits: {
+    fileSize: config.maxUploadBytes,
+    // No `files` limit here - omitting it (rather than passing a number to
+    // upload.array below) means an unlimited number of files per batch.
+    // fieldSize is bumped because the relativePaths JSON field (one path
+    // per file, for folder uploads) can otherwise hit busboy's 1MB default
+    // on a folder with tens of thousands of files.
+    fieldSize: 50 * 1024 * 1024,
+  },
 });
 
 // Resolves (creating as needed) the chain of subfolders described by
@@ -166,7 +174,7 @@ function resolveFolderChain(ownerId, baseParentId, segments, cache) {
   return parentId;
 }
 
-router.post('/upload', requireFetchHeader, requireAuth, upload.array('files', 5000), async (req, res) => {
+router.post('/upload', requireFetchHeader, requireAuth, upload.array('files'), async (req, res) => {
   const parentId = fromClientParentId(req.body?.parentId);
   if (!assertParentIsUsableFolder(req, res, parentId)) {
     // Clean up anything multer already wrote to disk before we reject.
