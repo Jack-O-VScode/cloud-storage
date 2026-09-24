@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { api, uploadFiles } from '../api.js';
+import { api, uploadFiles, downloadZip } from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useToast } from '../components/Toasts.jsx';
 import ItemsList from '../components/ItemsList.jsx';
 import TextPromptModal from '../components/TextPromptModal.jsx';
 import MoveModal from '../components/MoveModal.jsx';
 import ShareModal from '../components/ShareModal.jsx';
+import PreviewModal from '../components/PreviewModal.jsx';
 import UsersAdminModal from '../components/UsersAdminModal.jsx';
 import { ConfirmDialog } from '../components/Modal.jsx';
 import { formatBytes } from '../utils/format.js';
@@ -26,9 +27,14 @@ export default function DrivePage() {
   const [uploadPct, setUploadPct] = useState(null);
 
   const [modal, setModal] = useState(null); // { type, node? }
+  const [selectedIds, setSelectedIds] = useState(new Set());
   const fileInputRef = useRef(null);
   const folderInputRef = useRef(null);
   const dragCounter = useRef(0);
+
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [view, parentId, searchQuery]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -79,9 +85,7 @@ export default function DrivePage() {
     if (node.type === 'folder') {
       openFolder(node.id);
     } else {
-      const a = document.createElement('a');
-      a.href = api.downloadUrl(node.id);
-      a.click();
+      setModal({ type: 'preview', node });
     }
   };
 
@@ -129,10 +133,18 @@ export default function DrivePage() {
   };
 
   const actions = {
-    download: (node) => {
-      const a = document.createElement('a');
-      a.href = api.downloadUrl(node.id);
-      a.click();
+    download: async (node) => {
+      if (node.type === 'folder') {
+        try {
+          await downloadZip([node.id]);
+        } catch (err) {
+          toast.push(err.message, 'error');
+        }
+      } else {
+        const a = document.createElement('a');
+        a.href = api.downloadUrl(node.id);
+        a.click();
+      }
     },
     share: (node) => setModal({ type: 'share', node }),
     rename: (node) => setModal({ type: 'rename', node }),
@@ -150,6 +162,42 @@ export default function DrivePage() {
       refreshUsage();
     },
     deleteForever: (node) => setModal({ type: 'delete-forever', node }),
+  };
+
+  const toggleSelect = (id) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+  const toggleSelectAll = () => {
+    setSelectedIds((prev) => (prev.size === items.length ? new Set() : new Set(items.map((i) => i.id))));
+  };
+  const clearSelection = () => setSelectedIds(new Set());
+  const selectedNodes = items.filter((i) => selectedIds.has(i.id));
+
+  const bulkDownload = async () => {
+    try {
+      await downloadZip([...selectedIds]);
+    } catch (err) {
+      toast.push(err.message, 'error');
+    }
+  };
+  const bulkTrash = async () => {
+    await Promise.all(selectedNodes.map((n) => api.patchNode(n.id, { trashed: true })));
+    toast.push(`Moved ${selectedNodes.length} item(s) to trash`, 'success');
+    clearSelection();
+    refresh();
+    refreshUsage();
+  };
+  const bulkRestore = async () => {
+    await Promise.all(selectedNodes.map((n) => api.patchNode(n.id, { trashed: false })));
+    toast.push(`Restored ${selectedNodes.length} item(s)`, 'success');
+    clearSelection();
+    refresh();
+    refreshUsage();
   };
 
   const closeModal = () => setModal(null);
@@ -292,12 +340,51 @@ export default function DrivePage() {
           </div>
         )}
 
+        {selectedIds.size > 0 && (
+          <div className="selection-bar">
+            <span>{selectedIds.size} selected</span>
+            {view !== 'trash' ? (
+              <>
+                <button className="btn" onClick={bulkDownload}>
+                  Download
+                </button>
+                <button className="btn" onClick={() => setModal({ type: 'bulk-move' })}>
+                  Move
+                </button>
+                <button className="btn btn-danger" onClick={bulkTrash}>
+                  Move to trash
+                </button>
+              </>
+            ) : (
+              <>
+                <button className="btn" onClick={bulkRestore}>
+                  Restore
+                </button>
+                <button className="btn btn-danger" onClick={() => setModal({ type: 'bulk-delete-forever' })}>
+                  Delete forever
+                </button>
+              </>
+            )}
+            <button className="link-btn" onClick={clearSelection}>
+              Clear
+            </button>
+          </div>
+        )}
+
         {dragActive && <div className="drop-overlay">Drop files to upload</div>}
 
         {loading ? (
           <div className="empty-state">Loading…</div>
         ) : (
-          <ItemsList items={items} trashView={view === 'trash'} onOpen={openItem} actions={actions} />
+          <ItemsList
+            items={items}
+            trashView={view === 'trash'}
+            onOpen={openItem}
+            actions={actions}
+            selectedIds={selectedIds}
+            onToggleSelect={toggleSelect}
+            onToggleSelectAll={toggleSelectAll}
+          />
         )}
       </main>
 
@@ -332,7 +419,8 @@ export default function DrivePage() {
 
       {modal?.type === 'move' && (
         <MoveModal
-          node={modal.node}
+          title={`Move "${modal.node.name}"`}
+          excludeIds={new Set([modal.node.id])}
           onCancel={closeModal}
           onMove={async (targetParentId) => {
             await api.patchNode(modal.node.id, { parentId: targetParentId });
@@ -343,9 +431,26 @@ export default function DrivePage() {
         />
       )}
 
+      {modal?.type === 'bulk-move' && (
+        <MoveModal
+          title={`Move ${selectedIds.size} items`}
+          excludeIds={selectedIds}
+          onCancel={closeModal}
+          onMove={async (targetParentId) => {
+            await Promise.all(selectedNodes.map((n) => api.patchNode(n.id, { parentId: targetParentId })));
+            toast.push(`Moved ${selectedNodes.length} item(s)`, 'success');
+            clearSelection();
+            closeModal();
+            refresh();
+          }}
+        />
+      )}
+
       {modal?.type === 'share' && (
         <ShareModal node={modal.node} onChanged={refresh} onClose={() => { closeModal(); refresh(); }} />
       )}
+
+      {modal?.type === 'preview' && <PreviewModal node={modal.node} onClose={closeModal} />}
 
       {modal?.type === 'delete-forever' && (
         <ConfirmDialog
@@ -356,6 +461,23 @@ export default function DrivePage() {
           onCancel={closeModal}
           onConfirm={async () => {
             await api.deleteNode(modal.node.id);
+            closeModal();
+            refresh();
+            refreshUsage();
+          }}
+        />
+      )}
+
+      {modal?.type === 'bulk-delete-forever' && (
+        <ConfirmDialog
+          title="Delete forever"
+          message={`Permanently delete ${selectedNodes.length} item(s)? This can't be undone.`}
+          confirmLabel="Delete forever"
+          danger
+          onCancel={closeModal}
+          onConfirm={async () => {
+            await Promise.all(selectedNodes.map((n) => api.deleteNode(n.id)));
+            clearSelection();
             closeModal();
             refresh();
             refreshUsage();

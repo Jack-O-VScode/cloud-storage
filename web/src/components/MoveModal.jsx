@@ -3,7 +3,11 @@ import Modal from './Modal.jsx';
 import Icon from './Icon.jsx';
 import { api } from '../api.js';
 
-export default function MoveModal({ node, onMove, onCancel }) {
+// `excludeIds` hides those folders from the destination picker - used both
+// to stop a single folder being moved into itself, and (for a bulk move)
+// to hide every folder currently selected so you can't drop a selection
+// inside one of its own members.
+export default function MoveModal({ title, excludeIds, onMove, onCancel }) {
   const [parentId, setParentId] = useState('root');
   const [breadcrumb, setBreadcrumb] = useState([]);
   const [folders, setFolders] = useState([]);
@@ -17,7 +21,7 @@ export default function MoveModal({ node, onMove, onCancel }) {
       .listNodes(parentId)
       .then((data) => {
         if (cancelled) return;
-        setFolders(data.items.filter((n) => n.type === 'folder' && n.id !== node.id));
+        setFolders(data.items.filter((n) => n.type === 'folder' && !excludeIds.has(n.id)));
         setBreadcrumb(data.breadcrumb);
       })
       .catch((e) => setError(e.message))
@@ -25,24 +29,20 @@ export default function MoveModal({ node, onMove, onCancel }) {
     return () => {
       cancelled = true;
     };
-  }, [parentId, node.id]);
+  }, [parentId, excludeIds]);
 
   const currentName = breadcrumb.length ? breadcrumb[breadcrumb.length - 1].name : 'My Drive';
 
   return (
     <Modal
-      title={`Move "${node.name}"`}
+      title={title}
       onClose={onCancel}
       footer={
         <>
           <button className="btn" onClick={onCancel}>
             Cancel
           </button>
-          <button
-            className="btn btn-primary"
-            disabled={parentId === node.parentId}
-            onClick={() => onMove(parentId)}
-          >
+          <button className="btn btn-primary" onClick={() => onMove(parentId)}>
             Move here
           </button>
         </>

@@ -8,9 +8,10 @@ import mime from 'mime-types';
 const uuid = crypto.randomUUID;
 import { config } from '../config.js';
 import { getState, save, findNodeById, childrenOf, allOwnedBy } from '../store.js';
-import { requireAuth, requireFetchHeader } from '../auth.js';
+import { requireAuth, requireFetchHeader, hashPassword } from '../auth.js';
 import { blobPath, diskUsage } from '../lib/paths.js';
 import { breadcrumb, isSelfOrDescendantMove, descendantsOf } from '../lib/tree.js';
+import { streamZip } from '../lib/zip.js';
 
 const router = Router();
 
@@ -19,6 +20,14 @@ function toClientParentId(parentId) {
 }
 function fromClientParentId(parentId) {
   return !parentId || parentId === 'root' ? null : parentId;
+}
+
+// Strips path separators/control characters so a file or folder name can
+// never be mistaken for a path segment - matters once names feed into zip
+// entry paths, not just because it's confusing in the UI.
+function sanitizeName(raw) {
+  const cleaned = String(raw || '').replace(/[/\\\u0000-\u001f]/g, ' ').trim();
+  return cleaned || 'Untitled';
 }
 
 function serialize(node) {
@@ -34,6 +43,9 @@ function serialize(node) {
     createdAt: node.createdAt,
     updatedAt: node.updatedAt,
     shared: Boolean(node.shareToken),
+    shareToken: node.shareToken || null,
+    shareExpiresAt: node.shareExpiresAt || null,
+    sharePasswordProtected: Boolean(node.sharePasswordHash),
   };
 }
 
@@ -93,15 +105,15 @@ router.get('/:id', requireAuth, (req, res) => {
 });
 
 router.post('/folder', requireFetchHeader, requireAuth, (req, res) => {
-  const name = String(req.body?.name || '').trim();
+  const rawName = String(req.body?.name || '').trim();
   const parentId = fromClientParentId(req.body?.parentId);
-  if (!name) return res.status(400).json({ error: 'Folder name is required' });
+  if (!rawName) return res.status(400).json({ error: 'Folder name is required' });
   if (!assertParentIsUsableFolder(req, res, parentId)) return;
   const state = getState();
   const now = Date.now();
   const node = {
     id: uuid(),
-    name,
+    name: sanitizeName(rawName),
     type: 'folder',
     parentId,
     ownerId: req.user.id,
@@ -212,7 +224,7 @@ router.post('/upload', requireFetchHeader, requireAuth, upload.array('files'), a
     }
     const node = {
       id: uuid(),
-      name: file.originalname,
+      name: sanitizeName(file.originalname),
       type: 'file',
       parentId: targetParentId,
       ownerId: req.user.id,
@@ -232,6 +244,16 @@ router.post('/upload', requireFetchHeader, requireAuth, upload.array('files'), a
   res.status(201).json({ items: created.map(serialize) });
 });
 
+router.post('/zip', requireFetchHeader, requireAuth, async (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+  const nodes = ids
+    .map((id) => findNodeById(id))
+    .filter((n) => n && n.ownerId === req.user.id && !n.trashed);
+  if (!nodes.length) return res.status(400).json({ error: 'No items selected' });
+  const zipName = nodes.length === 1 ? `${nodes[0].name}.zip` : 'download.zip';
+  await streamZip(res, nodes, zipName);
+});
+
 router.patch('/:id', requireFetchHeader, requireAuth, (req, res) => {
   const node = loadOwnedNode(req, res);
   if (!node) return;
@@ -240,7 +262,7 @@ router.patch('/:id', requireFetchHeader, requireAuth, (req, res) => {
   if (typeof name === 'string') {
     const trimmed = name.trim();
     if (!trimmed) return res.status(400).json({ error: 'Name cannot be empty' });
-    node.name = trimmed;
+    node.name = sanitizeName(trimmed);
   }
 
   if (parentId !== undefined) {
@@ -305,8 +327,19 @@ router.delete('/:id', requireFetchHeader, requireAuth, async (req, res) => {
 router.post('/:id/share', requireFetchHeader, requireAuth, (req, res) => {
   const node = loadOwnedNode(req, res);
   if (!node) return;
-  if (node.type !== 'file') return res.status(400).json({ error: 'Only files can be shared' });
-  node.shareToken = crypto.randomBytes(24).toString('base64url');
+  const { expiresInMs, password } = req.body || {};
+  // Keep the existing token (if any) so changing just the expiry/password
+  // doesn't invalidate a link already handed out. Both settings are only
+  // touched when explicitly present in the body - the client can't safely
+  // re-send a password it's never given back, so omitting the field means
+  // "leave it as-is" rather than "clear it".
+  if (!node.shareToken) node.shareToken = crypto.randomBytes(24).toString('base64url');
+  if (expiresInMs !== undefined) {
+    node.shareExpiresAt = typeof expiresInMs === 'number' && expiresInMs > 0 ? Date.now() + expiresInMs : null;
+  }
+  if (password !== undefined) {
+    node.sharePasswordHash = password ? hashPassword(password) : null;
+  }
   save();
   res.json({ item: serialize(node), shareToken: node.shareToken });
 });
@@ -315,6 +348,8 @@ router.delete('/:id/share', requireFetchHeader, requireAuth, (req, res) => {
   const node = loadOwnedNode(req, res);
   if (!node) return;
   node.shareToken = null;
+  node.shareExpiresAt = null;
+  node.sharePasswordHash = null;
   save();
   res.json({ item: serialize(node) });
 });

@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import Icon from './Icon.jsx';
+import { api } from '../api.js';
 import { formatBytes, formatDate, mimeCategory } from '../utils/format.js';
 
 function useOutsideClose(ref, onClose) {
@@ -20,12 +21,8 @@ function RowMenu({ node, trashView, actions, onClose }) {
     <div className="row-menu" ref={ref}>
       {!trashView && (
         <>
-          {node.type === 'file' && (
-            <button onClick={() => actions.download(node)}>Download</button>
-          )}
-          {node.type === 'file' && (
-            <button onClick={() => actions.share(node)}>Share link</button>
-          )}
+          <button onClick={() => actions.download(node)}>Download</button>
+          <button onClick={() => actions.share(node)}>Share link</button>
           <button onClick={() => actions.rename(node)}>Rename</button>
           <button onClick={() => actions.move(node)}>Move</button>
           <button className="danger" onClick={() => actions.trash(node)}>
@@ -45,17 +42,35 @@ function RowMenu({ node, trashView, actions, onClose }) {
   );
 }
 
-export default function ItemsList({ items, trashView, onOpen, actions }) {
+function RowIcon({ item }) {
+  const category = mimeCategory(item);
+  if (category === 'image') {
+    return <img className="items-thumb" src={api.previewUrl(item.id)} loading="lazy" alt="" />;
+  }
+  return <Icon category={category} />;
+}
+
+export default function ItemsList({ items, trashView, onOpen, actions, selectedIds, onToggleSelect, onToggleSelectAll }) {
   const [openMenu, setOpenMenu] = useState(null);
 
   if (items.length === 0) {
     return <div className="empty-state">{trashView ? 'Trash is empty.' : 'This folder is empty.'}</div>;
   }
 
+  const allSelected = items.length > 0 && items.every((i) => selectedIds.has(i.id));
+
   return (
     <div className="items-table">
       <div className="items-header">
-        <span>Name</span>
+        <span className="items-name">
+          <input
+            type="checkbox"
+            checked={allSelected}
+            onChange={onToggleSelectAll}
+            aria-label="Select all"
+          />
+          <span>Name</span>
+        </span>
         <span>Size</span>
         <span>Modified</span>
         <span />
@@ -63,11 +78,17 @@ export default function ItemsList({ items, trashView, onOpen, actions }) {
       {items.map((item) => (
         <div
           key={item.id}
-          className="items-row"
+          className={`items-row ${selectedIds.has(item.id) ? 'selected' : ''}`}
           onDoubleClick={() => !trashView && onOpen(item)}
         >
           <span className="items-name">
-            <Icon category={mimeCategory(item)} />
+            <input
+              type="checkbox"
+              checked={selectedIds.has(item.id)}
+              onChange={() => onToggleSelect(item.id)}
+              onClick={(e) => e.stopPropagation()}
+            />
+            <RowIcon item={item} />
             <span className="items-name-text">{item.name}</span>
             {item.shared && <span className="badge">shared</span>}
           </span>

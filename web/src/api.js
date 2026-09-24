@@ -48,14 +48,54 @@ export const api = {
   patchNode: (id, patch) => request(`/nodes/${id}`, { method: 'PATCH', body: patch }),
   deleteNode: (id) => request(`/nodes/${id}`, { method: 'DELETE' }),
   emptyTrash: () => request('/nodes/trash', { method: 'DELETE' }),
-  share: (id) => request(`/nodes/${id}/share`, { method: 'POST' }),
+  share: (id, opts) => request(`/nodes/${id}/share`, { method: 'POST', body: opts || {} }),
   unshare: (id) => request(`/nodes/${id}/share`, { method: 'DELETE' }),
 
   usage: () => request('/storage/usage'),
 
   downloadUrl: (id) => `${BASE}/nodes/${id}/download?download=1`,
-  shareDownloadUrl: (token) => `${BASE}/share/${token}/download`,
+  previewUrl: (id) => `${BASE}/nodes/${id}/download`,
+
+  // Public share endpoints (no auth cookie needed - the token is the credential).
+  shareMeta: (token) => request(`/share/${token}`),
+  shareUnlock: (token, password) => request(`/share/${token}/unlock`, { method: 'POST', body: { password } }),
+  shareList: (token, nodeId) =>
+    request(`/share/${token}/list${nodeId ? `?nodeId=${encodeURIComponent(nodeId)}` : ''}`),
+  shareDownloadUrl: (token, nodeId) =>
+    `${BASE}/share/${token}/download${nodeId ? `?nodeId=${encodeURIComponent(nodeId)}` : ''}`,
+  shareZipUrl: (token, nodeId) =>
+    `${BASE}/share/${token}/zip${nodeId ? `?nodeId=${encodeURIComponent(nodeId)}` : ''}`,
 };
+
+// Bulk zip download goes through fetch (not the JSON `request` helper)
+// since the response body is binary, then gets saved via a synthetic link.
+export async function downloadZip(ids) {
+  const res = await fetch(BASE + '/nodes/zip', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'cloud-storage' },
+    credentials: 'same-origin',
+    body: JSON.stringify({ ids }),
+  });
+  if (!res.ok) {
+    let data = {};
+    try {
+      data = await res.json();
+    } catch {
+      // ignore
+    }
+    throw new ApiError(data.error || `Download failed (${res.status})`, res.status);
+  }
+  const blob = await res.blob();
+  const disposition = res.headers.get('content-disposition') || '';
+  const match = /filename\*=UTF-8''([^;]+)/.exec(disposition);
+  const filename = match ? decodeURIComponent(match[1]) : 'download.zip';
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
 // XHR (not fetch) so we get upload progress events.
 // `relativePaths`, when given, must be the same length/order as `files` -

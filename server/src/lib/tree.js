@@ -29,6 +29,21 @@ export function isSelfOrDescendantMove(nodeId, targetParentId) {
   return false;
 }
 
+// True if `nodeId` is `rootId` itself or nested somewhere under it - used to
+// keep a shared folder's public browsing confined to its own subtree.
+export function isWithin(nodeId, rootId) {
+  if (nodeId === rootId) return true;
+  let cur = findNodeById(nodeId);
+  const seen = new Set();
+  while (cur) {
+    if (cur.parentId === rootId) return true;
+    if (seen.has(cur.id)) break;
+    seen.add(cur.id);
+    cur = cur.parentId ? findNodeById(cur.parentId) : null;
+  }
+  return false;
+}
+
 export function descendantsOf(nodeId) {
   const state = getState();
   const result = [];

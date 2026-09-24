@@ -1,37 +1,195 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { api } from '../api.js';
-import { formatBytes } from '../utils/format.js';
+import Icon from '../components/Icon.jsx';
+import { formatBytes, mimeCategory } from '../utils/format.js';
+
+function FilePreview({ token, item }) {
+  const category = mimeCategory(item);
+  const url = api.shareDownloadUrl(token, item.id);
+  if (category === 'image') return <img className="preview-media" src={url} alt={item.name} />;
+  if (category === 'video')
+    return (
+      <video className="preview-media" src={url} controls>
+        Your browser can't play this video.
+      </video>
+    );
+  if (category === 'audio') return <audio className="preview-audio" src={url} controls />;
+  return null;
+}
 
 export default function SharePage({ token }) {
-  const [item, setItem] = useState(null);
-  const [error, setError] = useState('');
+  const [meta, setMeta] = useState(null); // { item, passwordRequired }
+  const [unlocked, setUnlocked] = useState(false);
+  const [password, setPassword] = useState('');
+  const [unlockError, setUnlockError] = useState('');
+  const [unlocking, setUnlocking] = useState(false);
+  const [loadError, setLoadError] = useState('');
 
-  useEffect(() => {
-    fetch(`/api/share/${token}`)
-      .then(async (r) => {
-        const data = await r.json();
-        if (!r.ok) throw new Error(data.error || 'Not found');
-        setItem(data.item);
+  const [currentNode, setCurrentNode] = useState(null); // current folder being browsed
+  const [items, setItems] = useState([]);
+  const [breadcrumb, setBreadcrumb] = useState([]);
+  const [browsing, setBrowsing] = useState(false);
+
+  const loadMeta = useCallback(() => {
+    api
+      .shareMeta(token)
+      .then((data) => {
+        setMeta(data);
+        setUnlocked(!data.passwordRequired);
       })
-      .catch((e) => setError(e.message));
+      .catch((e) => setLoadError(e.message));
   }, [token]);
 
+  useEffect(() => {
+    loadMeta();
+  }, [loadMeta]);
+
+  const loadFolder = useCallback(
+    (nodeId) => {
+      setBrowsing(true);
+      api
+        .shareList(token, nodeId)
+        .then((data) => {
+          setItems(data.items);
+          setBreadcrumb(data.breadcrumb);
+          setCurrentNode(data.breadcrumb[data.breadcrumb.length - 1] || meta.item);
+        })
+        .catch((e) => setLoadError(e.message))
+        .finally(() => setBrowsing(false));
+    },
+    [token, meta]
+  );
+
+  useEffect(() => {
+    if (unlocked && meta?.item?.type === 'folder') {
+      loadFolder(meta.item.id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unlocked, meta?.item?.id]);
+
+  const unlock = async (e) => {
+    e.preventDefault();
+    setUnlocking(true);
+    setUnlockError('');
+    try {
+      await api.shareUnlock(token, password);
+      setUnlocked(true);
+      loadMeta();
+    } catch (err) {
+      setUnlockError(err.message);
+    } finally {
+      setUnlocking(false);
+    }
+  };
+
+  if (loadError) {
+    return (
+      <div className="auth-screen">
+        <div className="auth-card">
+          <h1>Not available</h1>
+          <p className="form-error">{loadError}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!meta) {
+    return (
+      <div className="auth-screen">
+        <div className="auth-card">
+          <p className="muted">Loading…</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!unlocked) {
+    return (
+      <div className="auth-screen">
+        <form className="auth-card" onSubmit={unlock}>
+          <h1>Password required</h1>
+          <p className="muted">
+            "{meta.item.name}" is password protected.
+          </p>
+          <label className="field-label">Password</label>
+          <input
+            className="text-input"
+            type="password"
+            autoFocus
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+          {unlockError && <p className="form-error">{unlockError}</p>}
+          <button className="btn btn-primary btn-block" disabled={unlocking}>
+            Unlock
+          </button>
+        </form>
+      </div>
+    );
+  }
+
+  if (meta.item.type === 'file') {
+    return (
+      <div className="auth-screen">
+        <div className="auth-card share-file-card">
+          <h1>{meta.item.name}</h1>
+          <p className="muted">{formatBytes(meta.item.size)}</p>
+          <FilePreview token={token} item={meta.item} />
+          <a className="btn btn-primary btn-block" href={api.shareDownloadUrl(token, meta.item.id)}>
+            Download
+          </a>
+        </div>
+      </div>
+    );
+  }
+
+  // Folder: read-only browse view.
   return (
-    <div className="auth-screen">
-      <div className="auth-card">
-        <h1>Shared file</h1>
-        {error && <p className="form-error">{error}</p>}
-        {item && (
-          <>
-            <p>
-              <strong>{item.name}</strong>
-            </p>
-            <p className="muted">{formatBytes(item.size)}</p>
-            <a className="btn btn-primary btn-block" href={api.shareDownloadUrl(token)}>
-              Download
-            </a>
-          </>
+    <div className="share-browse-screen">
+      <div className="share-browse-header">
+        <div className="breadcrumb">
+          {breadcrumb.map((b, i) => (
+            <React.Fragment key={b.id}>
+              {i > 0 && <span> / </span>}
+              <button className="link-btn" onClick={() => loadFolder(b.id)}>
+                {b.name}
+              </button>
+            </React.Fragment>
+          ))}
+        </div>
+        {currentNode && (
+          <a className="btn btn-primary" href={api.shareZipUrl(token, currentNode.id)}>
+            Download all as zip
+          </a>
         )}
+      </div>
+      <div className="items-table">
+        <div className="items-header two-col">
+          <span>Name</span>
+          <span>Size</span>
+        </div>
+        {browsing && <p className="muted" style={{ padding: '12px 16px' }}>Loading…</p>}
+        {!browsing && items.length === 0 && <div className="empty-state">This folder is empty.</div>}
+        {!browsing &&
+          items.map((item) => (
+            <div
+              key={item.id}
+              className="items-row two-col"
+              onDoubleClick={() => (item.type === 'folder' ? loadFolder(item.id) : null)}
+            >
+              <span className="items-name">
+                <Icon category={mimeCategory(item)} />
+                <span className="items-name-text">{item.name}</span>
+              </span>
+              <span className="muted">
+                {item.type === 'file' ? (
+                  <a href={api.shareDownloadUrl(token, item.id)}>{formatBytes(item.size)} · Download</a>
+                ) : (
+                  '—'
+                )}
+              </span>
+            </div>
+          ))}
       </div>
     </div>
   );

@@ -179,6 +179,10 @@ button {
   gap: 12px;
   padding: 10px 12px;
 }
+.items-header.two-col,
+.items-row.two-col {
+  grid-template-columns: 1fr 200px;
+}
 
 .items-header {
   color: var(--text-muted);
@@ -196,6 +200,10 @@ button {
   background: var(--surface);
   box-shadow: 0 0 0 1px var(--border);
 }
+.items-row.selected {
+  background: var(--surface);
+  box-shadow: 0 0 0 1px var(--primary);
+}
 
 .items-name {
   display: flex;
@@ -207,6 +215,13 @@ button {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.items-thumb {
+  width: 22px;
+  height: 22px;
+  object-fit: cover;
+  border-radius: 4px;
+  flex-shrink: 0;
 }
 
 .items-actions {
@@ -282,6 +297,20 @@ button {
   height: 100%;
   background: var(--primary);
   transition: width 0.15s ease;
+}
+
+.selection-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 24px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+}
+.selection-bar > span:first-child {
+  font-weight: 600;
+  margin-right: 4px;
 }
 
 /* Buttons & inputs */
@@ -546,6 +575,56 @@ button {
 .auth-card h1 {
   font-size: 20px;
   margin: 0 0 6px;
+}
+.share-file-card {
+  width: 420px;
+}
+
+/* Preview modal */
+.preview-media {
+  display: block;
+  max-width: 100%;
+  max-height: 70vh;
+  margin: 0 auto;
+  border-radius: 6px;
+}
+.preview-audio {
+  width: 100%;
+}
+.preview-frame {
+  width: 100%;
+  height: 70vh;
+  border: none;
+  border-radius: 6px;
+}
+.preview-text {
+  max-height: 60vh;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.preview-fallback {
+  text-align: center;
+  padding: 30px 0;
+}
+
+/* Public folder share browsing */
+.share-browse-screen {
+  min-height: 100vh;
+  background: var(--bg);
+}
+.share-browse-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border);
 }
 
 @media (max-width: 720px) {
