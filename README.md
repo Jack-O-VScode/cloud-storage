@@ -257,7 +257,13 @@ Open `http://localhost:5173`.
   disk are named by a random id, decoupled from the user-visible name/path.
 - Trash is soft-delete; "Empty trash" / "Delete forever" is what actually
   removes files from disk.
-- Share links are unguessable tokens with no expiry by default — anyone
-  with the link can view/download that one file, same trust model as
-  "anyone with the link" on Google Drive. Revoke a link any time from the
-  file's menu.
+- Files and folders can both be shared via unguessable link tokens, with
+  optional expiry and password protection. A shared folder gets a
+  read-only public browsing view (list contents, download individual
+  files, download the whole thing as a zip); access is confined
+  server-side to that folder's own subtree. Revoke a link any time from
+  the item's menu.
+- Multi-select supports bulk download (as a zip), move, and trash/restore/
+  delete-forever. Double-clicking a file opens an in-browser preview for
+  images, video, audio, PDFs, and text files where possible; the kebab
+  menu's "Download" always does a direct download instead.
