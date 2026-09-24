@@ -46,6 +46,9 @@ app.use((err, req, res, next) => {
   if (err?.type === 'entity.too.large' || err?.code === 'LIMIT_FILE_SIZE') {
     return res.status(413).json({ error: 'File too large' });
   }
+  if (err?.code === 'LIMIT_UNEXPECTED_FILE') {
+    return res.status(413).json({ error: 'Too many files in this upload at once' });
+  }
   console.error(err);
   res.status(500).json({ error: 'Internal server error' });
 });

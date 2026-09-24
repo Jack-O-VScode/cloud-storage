@@ -166,7 +166,7 @@ function resolveFolderChain(ownerId, baseParentId, segments, cache) {
   return parentId;
 }
 
-router.post('/upload', requireFetchHeader, requireAuth, upload.array('files', 300), async (req, res) => {
+router.post('/upload', requireFetchHeader, requireAuth, upload.array('files', 5000), async (req, res) => {
   const parentId = fromClientParentId(req.body?.parentId);
   if (!assertParentIsUsableFolder(req, res, parentId)) {
     // Clean up anything multer already wrote to disk before we reject.
