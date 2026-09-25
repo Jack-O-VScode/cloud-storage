@@ -12,6 +12,7 @@ import UsersAdminModal from '../components/UsersAdminModal.jsx';
 import BackupsModal from '../components/BackupsModal.jsx';
 import ActivityModal from '../components/ActivityModal.jsx';
 import SettingsModal from '../components/SettingsModal.jsx';
+import StorageModal from '../components/StorageModal.jsx';
 import { ConfirmDialog } from '../components/Modal.jsx';
 import { formatBytes } from '../utils/format.js';
 import { filesToEntries, collectFilesFromDataTransfer } from '../utils/collectFiles.js';
@@ -20,7 +21,7 @@ export default function DrivePage() {
   const { user, logout } = useAuth();
   const toast = useToast();
 
-  const [view, setView] = useState('browse'); // browse | trash | search
+  const [view, setView] = useState('browse'); // browse | trash | search | starred | recent
   const [parentId, setParentId] = useState('root');
   const [breadcrumb, setBreadcrumb] = useState([]);
   const [items, setItems] = useState([]);
@@ -66,6 +67,14 @@ export default function DrivePage() {
         setBreadcrumb([]);
       } else if (view === 'search') {
         const data = await api.search(searchQuery);
+        setItems(data.items);
+        setBreadcrumb([]);
+      } else if (view === 'starred') {
+        const data = await api.listStarred();
+        setItems(data.items);
+        setBreadcrumb([]);
+      } else if (view === 'recent') {
+        const data = await api.listRecent();
         setItems(data.items);
         setBreadcrumb([]);
       } else {
@@ -175,9 +184,16 @@ export default function DrivePage() {
 
   const onMoveItem = async (draggedId, targetFolderId) => {
     const dragged = items.find((i) => i.id === draggedId);
+    const previousParentId = dragged?.parentId;
     try {
       await api.patchNode(draggedId, { parentId: targetFolderId });
-      toast.push(`Moved "${dragged?.name || 'item'}"`, 'success');
+      toast.push(`Moved "${dragged?.name || 'item'}"`, 'success', 6000, {
+        label: 'Undo',
+        onClick: async () => {
+          await api.patchNode(draggedId, { parentId: previousParentId });
+          refresh();
+        },
+      });
       refresh();
     } catch (err) {
       toast.push(err.message, 'error');
@@ -228,7 +244,14 @@ export default function DrivePage() {
     move: (node) => setModal({ type: 'move', node }),
     trash: async (node) => {
       await api.patchNode(node.id, { trashed: true });
-      toast.push(`Moved "${node.name}" to trash`, 'success');
+      toast.push(`Moved "${node.name}" to trash`, 'success', 6000, {
+        label: 'Undo',
+        onClick: async () => {
+          await api.patchNode(node.id, { trashed: false });
+          refresh();
+          refreshUsage();
+        },
+      });
       refresh();
       refreshUsage();
     },
@@ -239,6 +262,10 @@ export default function DrivePage() {
       refreshUsage();
     },
     deleteForever: (node) => setModal({ type: 'delete-forever', node }),
+    toggleStar: async (node) => {
+      await api.patchNode(node.id, { starred: !node.starred });
+      refresh();
+    },
   };
 
   const toggleSelect = (id) => {
@@ -263,8 +290,16 @@ export default function DrivePage() {
     }
   };
   const bulkTrash = async () => {
-    await Promise.all(selectedNodes.map((n) => api.patchNode(n.id, { trashed: true })));
-    toast.push(`Moved ${selectedNodes.length} item(s) to trash`, 'success');
+    const targets = selectedNodes;
+    await Promise.all(targets.map((n) => api.patchNode(n.id, { trashed: true })));
+    toast.push(`Moved ${targets.length} item(s) to trash`, 'success', 6000, {
+      label: 'Undo',
+      onClick: async () => {
+        await Promise.all(targets.map((n) => api.patchNode(n.id, { trashed: false })));
+        refresh();
+        refreshUsage();
+      },
+    });
     clearSelection();
     refresh();
     refreshUsage();
@@ -334,6 +369,18 @@ export default function DrivePage() {
             My Drive
           </button>
           <button
+            className={`side-nav-item ${view === 'starred' ? 'active' : ''}`}
+            onClick={() => setView('starred')}
+          >
+            Starred
+          </button>
+          <button
+            className={`side-nav-item ${view === 'recent' ? 'active' : ''}`}
+            onClick={() => setView('recent')}
+          >
+            Recent
+          </button>
+          <button
             className={`side-nav-item ${view === 'trash' ? 'active' : ''}`}
             onClick={() => setView('trash')}
           >
@@ -342,7 +389,7 @@ export default function DrivePage() {
         </nav>
         <div className="sidebar-spacer" />
         {usage && (
-          <div className="usage-box">
+          <button className="usage-box" onClick={() => setModal({ type: 'storage' })}>
             <div className="usage-bar">
               <div
                 className="usage-bar-fill"
@@ -367,7 +414,7 @@ export default function DrivePage() {
                 </>
               )}
             </div>
-          </div>
+          </button>
         )}
         <div className="admin-links">
           <button className="link-btn" onClick={() => setModal({ type: 'settings' })}>
@@ -420,6 +467,16 @@ export default function DrivePage() {
                   Empty trash
                 </button>
               )}
+            </div>
+          )}
+          {view === 'starred' && (
+            <div className="breadcrumb">
+              <strong>Starred</strong>
+            </div>
+          )}
+          {view === 'recent' && (
+            <div className="breadcrumb">
+              <strong>Recent</strong>
             </div>
           )}
           <input
@@ -489,7 +546,7 @@ export default function DrivePage() {
             onToggleSelectAll={toggleSelectAll}
             sortBy={sortBy}
             sortDir={sortDir}
-            onSortChange={view === 'browse' ? onSortChange : undefined}
+            onSortChange={view === 'browse' || view === 'starred' || view === 'recent' ? onSortChange : undefined}
             onMoveItem={view === 'browse' ? onMoveItem : undefined}
           />
         )}
@@ -530,8 +587,15 @@ export default function DrivePage() {
           excludeIds={new Set([modal.node.id])}
           onCancel={closeModal}
           onMove={async (targetParentId) => {
+            const previousParentId = modal.node.parentId;
             await api.patchNode(modal.node.id, { parentId: targetParentId });
-            toast.push(`Moved "${modal.node.name}"`, 'success');
+            toast.push(`Moved "${modal.node.name}"`, 'success', 6000, {
+              label: 'Undo',
+              onClick: async () => {
+                await api.patchNode(modal.node.id, { parentId: previousParentId });
+                refresh();
+              },
+            });
             closeModal();
             refresh();
           }}
@@ -544,8 +608,15 @@ export default function DrivePage() {
           excludeIds={selectedIds}
           onCancel={closeModal}
           onMove={async (targetParentId) => {
-            await Promise.all(selectedNodes.map((n) => api.patchNode(n.id, { parentId: targetParentId })));
-            toast.push(`Moved ${selectedNodes.length} item(s)`, 'success');
+            const originalParents = selectedNodes.map((n) => ({ id: n.id, parentId: n.parentId }));
+            await Promise.all(originalParents.map((n) => api.patchNode(n.id, { parentId: targetParentId })));
+            toast.push(`Moved ${originalParents.length} item(s)`, 'success', 6000, {
+              label: 'Undo',
+              onClick: async () => {
+                await Promise.all(originalParents.map((n) => api.patchNode(n.id, { parentId: n.parentId })));
+                refresh();
+              },
+            });
             clearSelection();
             closeModal();
             refresh();
@@ -616,6 +687,7 @@ export default function DrivePage() {
       {modal?.type === 'backups' && <BackupsModal onClose={closeModal} />}
       {modal?.type === 'activity' && <ActivityModal onClose={closeModal} />}
       {modal?.type === 'settings' && <SettingsModal onClose={closeModal} />}
+      {modal?.type === 'storage' && <StorageModal usage={usage} onClose={closeModal} />}
     </div>
   );
 }

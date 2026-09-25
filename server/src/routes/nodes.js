@@ -57,6 +57,7 @@ function serialize(node) {
     shareExpiresAt: node.shareExpiresAt || null,
     sharePasswordProtected: Boolean(node.sharePasswordHash),
     shareUploadEnabled: node.type === 'folder' ? Boolean(node.shareUploadEnabled) : false,
+    starred: Boolean(node.starred),
   };
 }
 
@@ -119,6 +120,25 @@ router.get('/search', requireAuth, (req, res) => {
   const items = allOwnedBy(req.user.id).filter(
     (n) => !n.trashed && n.name.toLowerCase().includes(q)
   );
+  res.json({ items: items.map(serialize) });
+});
+
+router.get('/starred', requireAuth, (req, res) => {
+  const items = allOwnedBy(req.user.id).filter((n) => n.starred && !n.trashed);
+  items.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+  res.json({ items: items.map(serialize) });
+});
+
+const RECENT_LIMIT = 50;
+
+// "Recent" is files only (a folder has no content of its own to have
+// "opened" recently) and ranked by their own last-modified time - cheap
+// and good enough without a separate access-log to maintain.
+router.get('/recent', requireAuth, (req, res) => {
+  const items = allOwnedBy(req.user.id)
+    .filter((n) => n.type === 'file' && !n.trashed)
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+    .slice(0, RECENT_LIMIT);
   res.json({ items: items.map(serialize) });
 });
 
@@ -304,8 +324,9 @@ router.post('/zip', requireFetchHeader, requireAuth, async (req, res) => {
 router.patch('/:id', requireFetchHeader, requireAuth, (req, res) => {
   const node = loadOwnedNode(req, res);
   if (!node) return;
-  const { name, parentId, trashed } = req.body || {};
+  const { name, parentId, trashed, starred } = req.body || {};
   const activityBase = { userId: req.user.id, username: req.user.username };
+  let contentChanged = false;
 
   if (typeof name === 'string') {
     const trimmed = name.trim();
@@ -314,6 +335,7 @@ router.patch('/:id', requireFetchHeader, requireAuth, (req, res) => {
     node.name = sanitizeName(trimmed);
     if (node.name !== oldName) {
       logActivity({ ...activityBase, action: 'rename', targetName: oldName, details: `to "${node.name}"` });
+      contentChanged = true;
     }
   }
 
@@ -325,6 +347,7 @@ router.patch('/:id', requireFetchHeader, requireAuth, (req, res) => {
     }
     node.parentId = targetParentId;
     logActivity({ ...activityBase, action: 'move', targetName: node.name });
+    contentChanged = true;
   }
 
   if (typeof trashed === 'boolean') {
@@ -337,9 +360,16 @@ router.patch('/:id', requireFetchHeader, requireAuth, (req, res) => {
       d.trashedAt = trashed ? Date.now() : null;
     }
     logActivity({ ...activityBase, action: trashed ? 'trash' : 'restore', targetName: node.name });
+    contentChanged = true;
   }
 
-  node.updatedAt = Date.now();
+  // Starring is metadata about the node, not a change to it - it shouldn't
+  // bump updatedAt, since that timestamp drives the "Recent files" view.
+  if (typeof starred === 'boolean') {
+    node.starred = starred;
+  }
+
+  if (contentChanged) node.updatedAt = Date.now();
   save();
   res.json({ item: serialize(node) });
 });

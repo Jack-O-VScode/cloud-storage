@@ -118,7 +118,19 @@ button {
 }
 
 .usage-box {
+  display: block;
+  width: 100%;
   padding: 8px 2px;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+.usage-box:hover {
+  background: var(--bg);
 }
 .usage-bar {
   height: 6px;
@@ -505,6 +517,24 @@ button {
   border-radius: 999px;
 }
 
+.star-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  font-size: 1rem;
+  line-height: 1;
+  color: var(--text-muted);
+  opacity: 0.5;
+}
+.items-row:hover .star-toggle {
+  opacity: 1;
+}
+.star-toggle.starred {
+  color: #e0a72e;
+  opacity: 1;
+}
+
 .divider {
   border: none;
   border-top: 1px solid var(--border);
@@ -651,9 +681,19 @@ button {
   box-shadow: var(--shadow);
   padding: 10px 16px;
   border-radius: 8px;
-  cursor: pointer;
   font-size: 0.875rem;
   max-width: 320px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.toast span {
+  cursor: pointer;
+  flex: 1;
+}
+.toast-action {
+  white-space: nowrap;
+  font-weight: 600;
 }
 .toast-error {
   border-color: var(--danger);
@@ -748,6 +788,35 @@ button {
   border: 1px solid var(--border);
   padding: 8px;
   background: #fff;
+}
+
+/* Storage breakdown modal */
+.storage-stack-bar {
+  display: flex;
+  height: 12px;
+  border-radius: 6px;
+  overflow: hidden;
+  margin: 12px 0;
+  background: var(--border);
+}
+.storage-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.storage-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.storage-legend-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+.storage-legend-label {
+  flex: 1;
 }
 
 /* Settings modal */

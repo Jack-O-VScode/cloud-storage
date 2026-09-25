@@ -43,6 +43,8 @@ export const api = {
 
   listNodes: (parentId) => request(`/nodes?parentId=${encodeURIComponent(parentId)}`),
   listTrash: () => request('/nodes/trash'),
+  listStarred: () => request('/nodes/starred'),
+  listRecent: () => request('/nodes/recent'),
   search: (q) => request(`/nodes/search?q=${encodeURIComponent(q)}`),
   getNode: (id) => request(`/nodes/${id}`),
   createFolder: (name, parentId) => request('/nodes/folder', { method: 'POST', body: { name, parentId } }),

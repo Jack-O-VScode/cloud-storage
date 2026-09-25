@@ -28,6 +28,9 @@ function RowMenu({ node, trashView, actions, onClose }) {
           <button onClick={() => actions.copyShareLink(node)}>Copy share link</button>
           {canNativeShare && <button onClick={() => actions.nativeShare(node)}>Share via…</button>}
           <button onClick={() => actions.share(node)}>Share settings</button>
+          <button onClick={() => actions.toggleStar(node)}>
+            {node.starred ? 'Remove from Starred' : 'Add to Starred'}
+          </button>
           <button onClick={() => actions.rename(node)}>Rename</button>
           <button onClick={() => actions.move(node)}>Move</button>
           <button className="danger" onClick={() => actions.trash(node)}>
@@ -169,6 +172,19 @@ export default function ItemsList({
             <RowIcon item={item} />
             <span className="items-name-text">{item.name}</span>
             {item.shared && <span className="badge">shared</span>}
+            {!trashView && (
+              <button
+                className={`star-toggle ${item.starred ? 'starred' : ''}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  actions.toggleStar(item);
+                }}
+                aria-label={item.starred ? 'Remove from starred' : 'Add to starred'}
+                title={item.starred ? 'Remove from starred' : 'Add to starred'}
+              >
+                {item.starred ? '★' : '☆'}
+              </button>
+            )}
           </span>
           <span className="muted">{item.type === 'file' ? formatBytes(item.size) : '—'}</span>
           <span className="muted">{formatDate(item.trashedAt || item.updatedAt)}</span>
