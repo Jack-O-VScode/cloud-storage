@@ -53,6 +53,12 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-app.listen(config.port, () => {
+const server = app.listen(config.port, () => {
   console.log(`cloud-storage server listening on port ${config.port} (data dir: ${config.dataDir})`);
 });
+
+// Node's default requestTimeout (5 minutes) caps how long a single request
+// is allowed to take from start to finish - a large file upload on a slow
+// connection easily exceeds that, silently killing the transfer partway
+// through with no file ending up saved. Give uploads several hours instead.
+server.requestTimeout = 6 * 60 * 60 * 1000;
