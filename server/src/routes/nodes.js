@@ -7,11 +7,12 @@ import multer from 'multer';
 import mime from 'mime-types';
 const uuid = crypto.randomUUID;
 import { config } from '../config.js';
-import { getState, save, findNodeById, findUserById, childrenOf, allOwnedBy } from '../store.js';
+import { getState, save, findNodeById, findUserById, childrenOf, allOwnedBy, logActivity } from '../store.js';
 import { requireAuth, requireFetchHeader, hashPassword } from '../auth.js';
 import { blobPath, diskUsage } from '../lib/paths.js';
 import { breadcrumb, isSelfOrDescendantMove, descendantsOf } from '../lib/tree.js';
 import { streamZip } from '../lib/zip.js';
+import { purgeNodeBlob } from '../lib/purge.js';
 
 const router = Router();
 
@@ -123,6 +124,7 @@ router.post('/folder', requireFetchHeader, requireAuth, (req, res) => {
     updatedAt: now,
   };
   state.nodes.push(node);
+  logActivity({ userId: req.user.id, username: req.user.username, action: 'create_folder', targetName: node.name });
   save();
   res.status(201).json({ item: serialize(node) });
 });
@@ -254,6 +256,14 @@ router.post('/upload', requireFetchHeader, requireAuth, upload.array('files'), a
     created.push(node);
   });
 
+  if (created.length) {
+    logActivity({
+      userId: req.user.id,
+      username: req.user.username,
+      action: 'upload',
+      targetName: created.length === 1 ? created[0].name : `${created.length} files`,
+    });
+  }
   await save();
   res.status(201).json({ items: created.map(serialize) });
 });
@@ -272,11 +282,16 @@ router.patch('/:id', requireFetchHeader, requireAuth, (req, res) => {
   const node = loadOwnedNode(req, res);
   if (!node) return;
   const { name, parentId, trashed } = req.body || {};
+  const activityBase = { userId: req.user.id, username: req.user.username };
 
   if (typeof name === 'string') {
     const trimmed = name.trim();
     if (!trimmed) return res.status(400).json({ error: 'Name cannot be empty' });
+    const oldName = node.name;
     node.name = sanitizeName(trimmed);
+    if (node.name !== oldName) {
+      logActivity({ ...activityBase, action: 'rename', targetName: oldName, details: `to "${node.name}"` });
+    }
   }
 
   if (parentId !== undefined) {
@@ -286,6 +301,7 @@ router.patch('/:id', requireFetchHeader, requireAuth, (req, res) => {
       return res.status(400).json({ error: "Can't move a folder into itself" });
     }
     node.parentId = targetParentId;
+    logActivity({ ...activityBase, action: 'move', targetName: node.name });
   }
 
   if (typeof trashed === 'boolean') {
@@ -297,6 +313,7 @@ router.patch('/:id', requireFetchHeader, requireAuth, (req, res) => {
       d.trashed = trashed;
       d.trashedAt = trashed ? Date.now() : null;
     }
+    logActivity({ ...activityBase, action: trashed ? 'trash' : 'restore', targetName: node.name });
   }
 
   node.updatedAt = Date.now();
@@ -304,11 +321,7 @@ router.patch('/:id', requireFetchHeader, requireAuth, (req, res) => {
   res.json({ item: serialize(node) });
 });
 
-async function purgeNode(node) {
-  if (node.type === 'file' && node.blobName) {
-    await fsp.unlink(blobPath(node.blobName)).catch(() => {});
-  }
-}
+const purgeNode = purgeNodeBlob;
 
 router.delete('/trash', requireFetchHeader, requireAuth, async (req, res) => {
   const state = getState();
@@ -319,6 +332,14 @@ router.delete('/trash', requireFetchHeader, requireAuth, async (req, res) => {
     state.nodes.filter((n) => trashedIds.has(n.id)).map((n) => purgeNode(n))
   );
   state.nodes = state.nodes.filter((n) => !trashedIds.has(n.id));
+  if (trashedIds.size) {
+    logActivity({
+      userId: req.user.id,
+      username: req.user.username,
+      action: 'empty_trash',
+      targetName: `${trashedIds.size} item(s)`,
+    });
+  }
   await save();
   res.json({ ok: true });
 });
@@ -334,6 +355,12 @@ router.delete('/:id', requireFetchHeader, requireAuth, async (req, res) => {
   await Promise.all(toRemove.map((n) => purgeNode(n)));
   const removeIds = new Set(toRemove.map((n) => n.id));
   state.nodes = state.nodes.filter((n) => !removeIds.has(n.id));
+  logActivity({
+    userId: req.user.id,
+    username: req.user.username,
+    action: 'delete_forever',
+    targetName: node.name,
+  });
   await save();
   res.json({ ok: true });
 });
@@ -354,6 +381,7 @@ router.post('/:id/share', requireFetchHeader, requireAuth, (req, res) => {
   if (password !== undefined) {
     node.sharePasswordHash = password ? hashPassword(password) : null;
   }
+  logActivity({ userId: req.user.id, username: req.user.username, action: 'share', targetName: node.name });
   save();
   res.json({ item: serialize(node), shareToken: node.shareToken });
 });
@@ -364,6 +392,7 @@ router.delete('/:id/share', requireFetchHeader, requireAuth, (req, res) => {
   node.shareToken = null;
   node.shareExpiresAt = null;
   node.sharePasswordHash = null;
+  logActivity({ userId: req.user.id, username: req.user.username, action: 'unshare', targetName: node.name });
   save();
   res.json({ item: serialize(node) });
 });

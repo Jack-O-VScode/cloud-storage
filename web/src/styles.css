@@ -130,6 +130,38 @@ button {
   font-size: 13.5px;
 }
 
+.admin-links {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 2px 8px;
+}
+
+.backup-estimate {
+  margin: 10px 0;
+}
+.backups-list,
+.activity-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.backups-row,
+.activity-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  gap: 12px;
+}
+.activity-row > span:first-child {
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
 .content {
   display: flex;
   flex-direction: column;
@@ -203,6 +235,30 @@ button {
 .items-row.selected {
   background: var(--surface);
   box-shadow: 0 0 0 1px var(--primary);
+}
+.items-row.drag-over {
+  background: rgba(59, 111, 224, 0.12);
+  box-shadow: 0 0 0 2px var(--primary);
+}
+
+.sort-header {
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.sort-header:hover {
+  color: var(--text);
+}
+.sort-arrow {
+  font-size: 9px;
 }
 
 .items-name {

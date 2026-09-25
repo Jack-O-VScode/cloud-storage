@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import crypto from 'node:crypto';
 const uuid = crypto.randomUUID;
-import { getState, save, findUserByUsername, allOwnedBy } from '../store.js';
+import { getState, save, findUserByUsername, allOwnedBy, logActivity } from '../store.js';
 import { requireAuth, requireAdmin, requireFetchHeader, hashPassword } from '../auth.js';
 
 const router = Router();
@@ -54,6 +54,12 @@ router.post('/', requireFetchHeader, requireAuth, requireAdmin, (req, res) => {
     quotaBytes: parsedQuota,
   };
   state.users.push(user);
+  logActivity({
+    userId: req.user.id,
+    username: req.user.username,
+    action: 'create_user',
+    targetName: user.username,
+  });
   save();
   res.status(201).json({ user: publicUser(user) });
 });
@@ -69,6 +75,13 @@ router.patch('/:id', requireFetchHeader, requireAuth, requireAdmin, (req, res) =
       return res.status(400).json({ error: 'Quota must be a positive number, or left blank for unlimited' });
     }
     user.quotaBytes = parsedQuota;
+    logActivity({
+      userId: req.user.id,
+      username: req.user.username,
+      action: 'update_quota',
+      targetName: user.username,
+      details: parsedQuota ? `${(parsedQuota / (1024 * 1024 * 1024)).toFixed(1)}GB` : 'unlimited',
+    });
   }
   save();
   res.json({ user: publicUser(user) });
@@ -81,7 +94,13 @@ router.delete('/:id', requireFetchHeader, requireAuth, requireAdmin, (req, res) 
   }
   const idx = state.users.findIndex((u) => u.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'User not found' });
-  state.users.splice(idx, 1);
+  const [removedUser] = state.users.splice(idx, 1);
+  logActivity({
+    userId: req.user.id,
+    username: req.user.username,
+    action: 'delete_user',
+    targetName: removedUser.username,
+  });
   // Leave that user's files/blobs in place on disk rather than silently
   // deleting someone's data as a side effect of an account removal.
   save();

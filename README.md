@@ -249,6 +249,10 @@ Open `http://localhost:5173`.
 | `MAX_UPLOAD_BYTES`  | `21474836480`  | Max size of a single uploaded file (default 20GB).                  |
 | `FORCE_HTTPS`       | `false`        | Set `true` only if a reverse proxy in front of this terminates TLS, so cookies are marked `Secure`. |
 | `DOMAIN`            | *(none)*       | Only used by `docker-compose.proxy.yml` — the hostname Caddy requests an HTTPS certificate for. |
+| `TRASH_AUTO_EMPTY_DAYS` | `30`       | Trashed items older than this are permanently deleted automatically. Set to `0` to disable and only ever delete trash by hand. |
+| `BACKUP_ENABLED`    | `true`         | Set `false` to turn off the automatic daily metadata backup entirely. |
+| `BACKUP_DIR`        | *(sibling of `DATA_DIR`)* | Where backups are stored — kept outside `DATA_DIR` so a full backup never ends up including earlier backups of itself. |
+| `BACKUP_RETENTION_COUNT` | `30`      | How many daily metadata backups to keep (they're tiny, so keeping a month's worth is cheap). The on-demand full backup always keeps only the single most recent copy, regardless of this setting. |
 
 ## Notes on the design
 

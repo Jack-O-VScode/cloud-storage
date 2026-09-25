@@ -2,7 +2,7 @@ import { Router } from 'express';
 import crypto from 'node:crypto';
 const uuid = crypto.randomUUID;
 import rateLimit from 'express-rate-limit';
-import { getState, save, findUserByUsername } from '../store.js';
+import { getState, save, findUserByUsername, logActivity } from '../store.js';
 import {
   hashPassword,
   verifyPassword,
@@ -60,6 +60,8 @@ router.post('/login', requireFetchHeader, loginLimiter, (req, res) => {
   if (!user || !verifyPassword(password || '', user.passwordHash)) {
     return res.status(401).json({ error: 'Invalid username or password' });
   }
+  logActivity({ userId: user.id, username: user.username, action: 'login' });
+  save();
   const token = issueToken(user);
   setSessionCookie(res, token);
   res.json({ user: publicUser(user) });

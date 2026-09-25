@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { config } from './config.js';
 
 // Personal-scale metadata store backed by a single JSON file. There's no
@@ -8,7 +9,7 @@ import { config } from './config.js';
 // object plus a serialized write queue is enough - no native DB dependency
 // to cross-compile for ARM.
 
-let state = { users: [], nodes: [] };
+let state = { users: [], nodes: [], activity: [] };
 let writeQueue = Promise.resolve();
 let dirty = false;
 
@@ -32,6 +33,7 @@ export function loadStore() {
   }
   state.users ||= [];
   state.nodes ||= [];
+  state.activity ||= [];
   return state;
 }
 
@@ -82,4 +84,30 @@ export function childrenOf(ownerId, parentId, { includeTrashed = false } = {}) {
 
 export function allOwnedBy(ownerId) {
   return state.nodes.filter((n) => n.ownerId === ownerId);
+}
+
+const MAX_ACTIVITY_ENTRIES = 1000;
+
+// Records a line in the activity log. Doesn't call save() itself - callers
+// already persist state after their own mutation, so this just piggybacks
+// on that write; routes with nothing else to persist (e.g. login) must
+// call save() themselves.
+export function logActivity({ userId, username, action, targetName, details }) {
+  state.activity ||= [];
+  state.activity.push({
+    id: crypto.randomUUID(),
+    timestamp: Date.now(),
+    userId: userId || null,
+    username: username || null,
+    action,
+    targetName: targetName || null,
+    details: details || null,
+  });
+  if (state.activity.length > MAX_ACTIVITY_ENTRIES) {
+    state.activity.splice(0, state.activity.length - MAX_ACTIVITY_ENTRIES);
+  }
+}
+
+export function getActivity(limit = 200) {
+  return (state.activity || []).slice(-limit).reverse();
 }

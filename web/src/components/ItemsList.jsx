@@ -3,6 +3,8 @@ import Icon from './Icon.jsx';
 import { api } from '../api.js';
 import { formatBytes, formatDate, mimeCategory } from '../utils/format.js';
 
+const DRAG_MIME = 'application/x-cloudstorage-node';
+
 function useOutsideClose(ref, onClose) {
   useEffect(() => {
     function handler(e) {
@@ -16,13 +18,16 @@ function useOutsideClose(ref, onClose) {
 function RowMenu({ node, trashView, actions, onClose }) {
   const ref = useRef(null);
   useOutsideClose(ref, onClose);
+  const canNativeShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
 
   return (
     <div className="row-menu" ref={ref}>
       {!trashView && (
         <>
           <button onClick={() => actions.download(node)}>Download</button>
-          <button onClick={() => actions.share(node)}>Share link</button>
+          <button onClick={() => actions.copyShareLink(node)}>Copy share link</button>
+          {canNativeShare && <button onClick={() => actions.nativeShare(node)}>Share via…</button>}
+          <button onClick={() => actions.share(node)}>Share settings</button>
           <button onClick={() => actions.rename(node)}>Rename</button>
           <button onClick={() => actions.move(node)}>Move</button>
           <button className="danger" onClick={() => actions.trash(node)}>
@@ -50,14 +55,38 @@ function RowIcon({ item }) {
   return <Icon category={category} />;
 }
 
-export default function ItemsList({ items, trashView, onOpen, actions, selectedIds, onToggleSelect, onToggleSelectAll }) {
+function SortHeader({ label, field, sortBy, sortDir, onSortChange }) {
+  const active = sortBy === field;
+  return (
+    <button className="sort-header" onClick={() => onSortChange(field)}>
+      {label}
+      {active && <span className="sort-arrow">{sortDir === 'asc' ? '▲' : '▼'}</span>}
+    </button>
+  );
+}
+
+export default function ItemsList({
+  items,
+  trashView,
+  onOpen,
+  actions,
+  selectedIds,
+  onToggleSelect,
+  onToggleSelectAll,
+  sortBy,
+  sortDir,
+  onSortChange,
+  onMoveItem,
+}) {
   const [openMenu, setOpenMenu] = useState(null);
+  const [dragOverId, setDragOverId] = useState(null);
 
   if (items.length === 0) {
     return <div className="empty-state">{trashView ? 'Trash is empty.' : 'This folder is empty.'}</div>;
   }
 
   const allSelected = items.length > 0 && items.every((i) => selectedIds.has(i.id));
+  const canDrag = !trashView && Boolean(onMoveItem);
 
   return (
     <div className="items-table">
@@ -69,17 +98,66 @@ export default function ItemsList({ items, trashView, onOpen, actions, selectedI
             onChange={onToggleSelectAll}
             aria-label="Select all"
           />
-          <span>Name</span>
+          {onSortChange ? (
+            <SortHeader label="Name" field="name" sortBy={sortBy} sortDir={sortDir} onSortChange={onSortChange} />
+          ) : (
+            <span>Name</span>
+          )}
         </span>
-        <span>Size</span>
-        <span>Modified</span>
+        {onSortChange ? (
+          <SortHeader label="Size" field="size" sortBy={sortBy} sortDir={sortDir} onSortChange={onSortChange} />
+        ) : (
+          <span>Size</span>
+        )}
+        {onSortChange ? (
+          <SortHeader
+            label="Modified"
+            field="updatedAt"
+            sortBy={sortBy}
+            sortDir={sortDir}
+            onSortChange={onSortChange}
+          />
+        ) : (
+          <span>Modified</span>
+        )}
         <span />
       </div>
       {items.map((item) => (
         <div
           key={item.id}
-          className={`items-row ${selectedIds.has(item.id) ? 'selected' : ''}`}
+          className={`items-row ${selectedIds.has(item.id) ? 'selected' : ''} ${
+            dragOverId === item.id ? 'drag-over' : ''
+          }`}
+          draggable={canDrag}
           onDoubleClick={() => !trashView && onOpen(item)}
+          onDragStart={(e) => {
+            if (!canDrag) return;
+            e.dataTransfer.setData(DRAG_MIME, item.id);
+            e.dataTransfer.effectAllowed = 'move';
+          }}
+          onDragOver={(e) => {
+            if (!canDrag || item.type !== 'folder') return;
+            if (!e.dataTransfer.types.includes(DRAG_MIME)) return;
+            e.preventDefault();
+            e.stopPropagation();
+          }}
+          onDragEnter={(e) => {
+            if (!canDrag || item.type !== 'folder') return;
+            if (!e.dataTransfer.types.includes(DRAG_MIME)) return;
+            e.preventDefault();
+            e.stopPropagation();
+            setDragOverId(item.id);
+          }}
+          onDragLeave={() => setDragOverId((cur) => (cur === item.id ? null : cur))}
+          onDrop={(e) => {
+            if (!canDrag || item.type !== 'folder') return;
+            if (!e.dataTransfer.types.includes(DRAG_MIME)) return;
+            e.preventDefault();
+            e.stopPropagation();
+            setDragOverId(null);
+            const draggedId = e.dataTransfer.getData(DRAG_MIME);
+            if (draggedId && draggedId !== item.id) onMoveItem(draggedId, item.id);
+          }}
         >
           <span className="items-name">
             <input

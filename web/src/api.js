@@ -66,6 +66,12 @@ export const api = {
     `${BASE}/share/${token}/download${nodeId ? `?nodeId=${encodeURIComponent(nodeId)}` : ''}`,
   shareZipUrl: (token, nodeId) =>
     `${BASE}/share/${token}/zip${nodeId ? `?nodeId=${encodeURIComponent(nodeId)}` : ''}`,
+
+  listBackups: () => request('/backups'),
+  createFullBackup: () => request('/backups/full', { method: 'POST' }),
+  backupDownloadUrl: (filename) => `${BASE}/backups/${encodeURIComponent(filename)}/download`,
+
+  listActivity: () => request('/activity'),
 };
 
 // Bulk zip download goes through fetch (not the JSON `request` helper)

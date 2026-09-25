@@ -8,6 +8,8 @@ import MoveModal from '../components/MoveModal.jsx';
 import ShareModal from '../components/ShareModal.jsx';
 import PreviewModal from '../components/PreviewModal.jsx';
 import UsersAdminModal from '../components/UsersAdminModal.jsx';
+import BackupsModal from '../components/BackupsModal.jsx';
+import ActivityModal from '../components/ActivityModal.jsx';
 import { ConfirmDialog } from '../components/Modal.jsx';
 import { formatBytes } from '../utils/format.js';
 import { filesToEntries, collectFilesFromDataTransfer } from '../utils/collectFiles.js';
@@ -28,9 +30,26 @@ export default function DrivePage() {
 
   const [modal, setModal] = useState(null); // { type, node? }
   const [selectedIds, setSelectedIds] = useState(new Set());
+  const [sortBy, setSortBy] = useState('name');
+  const [sortDir, setSortDir] = useState('asc');
+  const [internalDragActive, setInternalDragActive] = useState(false);
   const fileInputRef = useRef(null);
   const folderInputRef = useRef(null);
   const dragCounter = useRef(0);
+
+  // Detects a drag that originated from one of our own rows (as opposed to
+  // an OS file drag) so the "drop files to upload" overlay doesn't flash
+  // while the user is just reordering items into a folder.
+  useEffect(() => {
+    const onStart = () => setInternalDragActive(true);
+    const onEnd = () => setInternalDragActive(false);
+    window.addEventListener('dragstart', onStart);
+    window.addEventListener('dragend', onEnd);
+    return () => {
+      window.removeEventListener('dragstart', onStart);
+      window.removeEventListener('dragend', onEnd);
+    };
+  }, []);
 
   useEffect(() => {
     setSelectedIds(new Set());
@@ -132,6 +151,44 @@ export default function DrivePage() {
     if (entries.length) doUploadEntries(entries);
   };
 
+  const onSortChange = (field) => {
+    if (sortBy === field) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortBy(field);
+      setSortDir('asc');
+    }
+  };
+
+  // Folders are always grouped before files, matching the server's default
+  // order; within each group, sort by whatever the user picked.
+  const sortedItems = [...items].sort((a, b) => {
+    if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
+    let cmp;
+    if (sortBy === 'size') cmp = (a.size || 0) - (b.size || 0);
+    else if (sortBy === 'updatedAt') cmp = (a.updatedAt || 0) - (b.updatedAt || 0);
+    else cmp = a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+    return sortDir === 'asc' ? cmp : -cmp;
+  });
+
+  const onMoveItem = async (draggedId, targetFolderId) => {
+    const dragged = items.find((i) => i.id === draggedId);
+    try {
+      await api.patchNode(draggedId, { parentId: targetFolderId });
+      toast.push(`Moved "${dragged?.name || 'item'}"`, 'success');
+      refresh();
+    } catch (err) {
+      toast.push(err.message, 'error');
+    }
+  };
+
+  const shareLinkFor = async (node) => {
+    if (node.shareToken) return `${window.location.origin}/s/${node.shareToken}`;
+    const { shareToken } = await api.share(node.id, {});
+    refresh();
+    return `${window.location.origin}/s/${shareToken}`;
+  };
+
   const actions = {
     download: async (node) => {
       if (node.type === 'folder') {
@@ -144,6 +201,24 @@ export default function DrivePage() {
         const a = document.createElement('a');
         a.href = api.downloadUrl(node.id);
         a.click();
+      }
+    },
+    copyShareLink: async (node) => {
+      try {
+        const link = await shareLinkFor(node);
+        await navigator.clipboard.writeText(link);
+        toast.push('Share link copied', 'success');
+      } catch (err) {
+        toast.push(err.message, 'error');
+      }
+    },
+    nativeShare: async (node) => {
+      try {
+        const link = await shareLinkFor(node);
+        await navigator.share({ title: node.name, url: link });
+      } catch (err) {
+        // AbortError just means the user closed the share sheet - not an error worth surfacing.
+        if (err.name !== 'AbortError') toast.push(err.message, 'error');
       }
     },
     share: (node) => setModal({ type: 'share', node }),
@@ -293,9 +368,17 @@ export default function DrivePage() {
           </div>
         )}
         {isAdmin && (
-          <button className="link-btn" onClick={() => setModal({ type: 'users' })}>
-            Manage users
-          </button>
+          <div className="admin-links">
+            <button className="link-btn" onClick={() => setModal({ type: 'users' })}>
+              Manage users
+            </button>
+            <button className="link-btn" onClick={() => setModal({ type: 'backups' })}>
+              Backups
+            </button>
+            <button className="link-btn" onClick={() => setModal({ type: 'activity' })}>
+              Activity
+            </button>
+          </div>
         )}
         <div className="user-row">
           <span>{user?.username}</span>
@@ -381,19 +464,23 @@ export default function DrivePage() {
           </div>
         )}
 
-        {dragActive && <div className="drop-overlay">Drop files to upload</div>}
+        {dragActive && !internalDragActive && <div className="drop-overlay">Drop files to upload</div>}
 
         {loading ? (
           <div className="empty-state">Loading…</div>
         ) : (
           <ItemsList
-            items={items}
+            items={sortedItems}
             trashView={view === 'trash'}
             onOpen={openItem}
             actions={actions}
             selectedIds={selectedIds}
             onToggleSelect={toggleSelect}
             onToggleSelectAll={toggleSelectAll}
+            sortBy={sortBy}
+            sortDir={sortDir}
+            onSortChange={view === 'browse' ? onSortChange : undefined}
+            onMoveItem={view === 'browse' ? onMoveItem : undefined}
           />
         )}
       </main>
@@ -512,6 +599,8 @@ export default function DrivePage() {
       )}
 
       {modal?.type === 'users' && <UsersAdminModal onClose={closeModal} />}
+      {modal?.type === 'backups' && <BackupsModal onClose={closeModal} />}
+      {modal?.type === 'activity' && <ActivityModal onClose={closeModal} />}
     </div>
   );
 }

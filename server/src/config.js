@@ -4,6 +4,9 @@ import crypto from 'node:crypto';
 const DATA_DIR = process.env.DATA_DIR || path.resolve('./data');
 const BLOB_DIR = path.join(DATA_DIR, 'blobs');
 const META_FILE = path.join(DATA_DIR, 'metadata.json');
+// Kept outside DATA_DIR (a sibling directory) so a backup zip of the data
+// directory never ends up including previous backups inside itself.
+const BACKUP_DIR = process.env.BACKUP_DIR || path.join(DATA_DIR, '..', 'cloud-storage-backups');
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const NODE_ENV = process.env.NODE_ENV || 'production';
 
@@ -30,4 +33,10 @@ export const config = {
   cookieName: 'cs_session',
   maxUploadBytes: parseInt(process.env.MAX_UPLOAD_BYTES || String(20 * 1024 * 1024 * 1024), 10), // 20GB default
   forceHttps: process.env.FORCE_HTTPS === 'true',
+  // 0 disables auto-empty entirely; trashed items are only ever removed by hand.
+  trashAutoEmptyDays: parseInt(process.env.TRASH_AUTO_EMPTY_DAYS ?? '30', 10) || 0,
+  backupDir: BACKUP_DIR,
+  backupEnabled: process.env.BACKUP_ENABLED !== 'false',
+  backupRetentionCount: parseInt(process.env.BACKUP_RETENTION_COUNT || '30', 10),
+  backupIntervalMs: 24 * 60 * 60 * 1000,
 };
