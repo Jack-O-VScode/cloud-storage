@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { api, uploadFiles, downloadZip } from '../api.js';
+import { api, uploadFiles, uploadVersion, downloadZip } from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useToast } from '../components/Toasts.jsx';
 import ItemsList from '../components/ItemsList.jsx';
@@ -14,6 +14,7 @@ import ActivityModal from '../components/ActivityModal.jsx';
 import SettingsModal from '../components/SettingsModal.jsx';
 import StorageModal from '../components/StorageModal.jsx';
 import CommandPalette from '../components/CommandPalette.jsx';
+import VersionHistoryModal from '../components/VersionHistoryModal.jsx';
 import { ConfirmDialog } from '../components/Modal.jsx';
 import { formatBytes } from '../utils/format.js';
 import { filesToEntries, collectFilesFromDataTransfer } from '../utils/collectFiles.js';
@@ -40,6 +41,8 @@ export default function DrivePage() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const fileInputRef = useRef(null);
   const folderInputRef = useRef(null);
+  const versionInputRef = useRef(null);
+  const versionTargetNode = useRef(null);
   const dragCounter = useRef(0);
 
   // Detects a drag that originated from one of our own rows (as opposed to
@@ -280,6 +283,11 @@ export default function DrivePage() {
       await api.patchNode(node.id, { starred: !node.starred });
       refresh();
     },
+    uploadVersion: (node) => {
+      versionTargetNode.current = node;
+      versionInputRef.current?.click();
+    },
+    versionHistory: (node) => setModal({ type: 'version-history', node }),
   };
 
   const toggleSelect = (id) => {
@@ -396,6 +404,26 @@ export default function DrivePage() {
           onChange={(e) => {
             doUploadEntries(filesToEntries(e.target.files));
             e.target.value = '';
+          }}
+        />
+        <input
+          ref={versionInputRef}
+          type="file"
+          style={{ display: 'none' }}
+          onChange={async (e) => {
+            const file = e.target.files?.[0];
+            const target = versionTargetNode.current;
+            e.target.value = '';
+            versionTargetNode.current = null;
+            if (!file || !target) return;
+            try {
+              await uploadVersion(target.id, file);
+              toast.push(`Uploaded a new version of "${target.name}"`, 'success');
+              refresh();
+              refreshUsage();
+            } catch (err) {
+              toast.push(err.message, 'error');
+            }
           }}
         />
         <nav className="side-nav">
@@ -722,6 +750,10 @@ export default function DrivePage() {
       {modal?.type === 'activity' && <ActivityModal onClose={closeModal} />}
       {modal?.type === 'settings' && <SettingsModal onClose={closeModal} />}
       {modal?.type === 'storage' && <StorageModal usage={usage} onClose={closeModal} />}
+
+      {modal?.type === 'version-history' && (
+        <VersionHistoryModal node={modal.node} onChanged={refresh} onClose={closeModal} />
+      )}
 
       <CommandPalette
         open={paletteOpen}

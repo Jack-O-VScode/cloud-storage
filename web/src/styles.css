@@ -819,6 +819,23 @@ button {
   flex: 1;
 }
 
+/* Version history modal */
+.version-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.version-row-current {
+  border-bottom: 2px solid var(--border);
+}
+.version-row-actions {
+  display: flex;
+  gap: 8px;
+}
+
 /* Command palette */
 .palette-backdrop {
   position: fixed;

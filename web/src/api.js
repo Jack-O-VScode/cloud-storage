@@ -59,6 +59,10 @@ export const api = {
 
   usage: () => request('/storage/usage'),
 
+  listVersions: (id) => request(`/nodes/${id}/versions`),
+  restoreVersion: (id, versionId) => request(`/nodes/${id}/versions/${versionId}/restore`, { method: 'POST' }),
+  versionDownloadUrl: (id, versionId) => `${BASE}/nodes/${id}/versions/${versionId}/download?download=1`,
+
   downloadUrl: (id) => `${BASE}/nodes/${id}/download?download=1`,
   previewUrl: (id) => `${BASE}/nodes/${id}/download`,
 
@@ -125,6 +129,34 @@ export function uploadFiles(files, parentId, onProgress, relativePaths) {
 
     const xhr = new XMLHttpRequest();
     xhr.open('POST', BASE + '/nodes/upload');
+    xhr.setRequestHeader('X-Requested-With', 'cloud-storage');
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
+    };
+    xhr.onload = () => {
+      let data = {};
+      try {
+        data = JSON.parse(xhr.responseText);
+      } catch {
+        // ignore
+      }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+      else reject(new ApiError(data.error || `Upload failed (${xhr.status})`, xhr.status));
+    };
+    xhr.onerror = () => reject(new ApiError('Network error during upload', 0));
+    xhr.send(form);
+  });
+}
+
+// Uploads a single file as a new version of an existing file node, keeping
+// its previous content around as history instead of it being lost.
+export function uploadVersion(nodeId, file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const form = new FormData();
+    form.append('file', file, file.name);
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${BASE}/nodes/${nodeId}/version`);
     xhr.setRequestHeader('X-Requested-With', 'cloud-storage');
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);

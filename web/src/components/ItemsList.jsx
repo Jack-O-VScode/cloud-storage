@@ -31,6 +31,14 @@ function RowMenu({ node, trashView, actions, onClose }) {
           <button onClick={() => actions.toggleStar(node)}>
             {node.starred ? 'Remove from Starred' : 'Add to Starred'}
           </button>
+          {node.type === 'file' && (
+            <>
+              <button onClick={() => actions.uploadVersion(node)}>Upload new version</button>
+              <button onClick={() => actions.versionHistory(node)}>
+                Version history{node.versionCount ? ` (${node.versionCount})` : ''}
+              </button>
+            </>
+          )}
           <button onClick={() => actions.rename(node)}>Rename</button>
           <button onClick={() => actions.move(node)}>Move</button>
           <button className="danger" onClick={() => actions.trash(node)}>

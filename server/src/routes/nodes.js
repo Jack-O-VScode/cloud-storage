@@ -59,6 +59,7 @@ function serialize(node) {
     sharePasswordProtected: Boolean(node.sharePasswordHash),
     shareUploadEnabled: node.type === 'folder' ? Boolean(node.shareUploadEnabled) : false,
     starred: Boolean(node.starred),
+    versionCount: (node.versions || []).length,
   };
 }
 
@@ -522,6 +523,116 @@ router.delete('/share-bundle/:id', requireFetchHeader, requireAuth, (req, res) =
   logActivity({ userId: req.user.id, username: req.user.username, action: 'unshare', targetName: 'shared selection' });
   save();
   res.json({ ok: true });
+});
+
+const MAX_VERSIONS = 10;
+
+// Re-uploading over an existing file (rather than uploading it fresh)
+// keeps the previous blob around as a version instead of overwriting it
+// silently, so a bad overwrite is always recoverable.
+router.post('/:id/version', requireFetchHeader, requireAuth, upload.single('file'), async (req, res) => {
+  const node = loadOwnedNode(req, res);
+  if (!node) {
+    if (req.file) await fsp.unlink(req.file.path).catch(() => {});
+    return;
+  }
+  if (node.type !== 'file') {
+    if (req.file) await fsp.unlink(req.file.path).catch(() => {});
+    return res.status(400).json({ error: 'Not a file' });
+  }
+  if (!req.file) return res.status(400).json({ error: 'No file provided' });
+
+  const quotaBytes = findUserById(req.user.id)?.quotaBytes;
+  if (quotaBytes) {
+    const currentlyUsed = allOwnedBy(req.user.id)
+      .filter((n) => n.type === 'file' && !n.trashed)
+      .reduce((sum, n) => sum + (n.size || 0), 0);
+    const netIncrease = req.file.size - (node.size || 0);
+    if (netIncrease > 0 && currentlyUsed + netIncrease > quotaBytes) {
+      await fsp.unlink(req.file.path).catch(() => {});
+      return res.status(413).json({ error: 'This new version would exceed your storage quota.' });
+    }
+  }
+
+  node.versions ||= [];
+  node.versions.push({
+    id: uuid(),
+    blobName: node.blobName,
+    size: node.size,
+    mimeType: node.mimeType,
+    createdAt: node.updatedAt || node.createdAt,
+  });
+  while (node.versions.length > MAX_VERSIONS) {
+    const dropped = node.versions.shift();
+    await fsp.unlink(blobPath(dropped.blobName)).catch(() => {});
+  }
+
+  const mimeType = req.file.mimetype || mime.lookup(req.file.originalname) || 'application/octet-stream';
+  node.blobName = req.file.filename;
+  node.size = req.file.size;
+  node.mimeType = mimeType;
+  node.updatedAt = Date.now();
+  const contentText = await extractText(blobPath(req.file.filename), { mimeType, name: node.name, size: req.file.size });
+  if (contentText) node.contentText = contentText;
+  else delete node.contentText;
+
+  logActivity({ userId: req.user.id, username: req.user.username, action: 'new_version', targetName: node.name });
+  await save();
+  res.status(201).json({ item: serialize(node) });
+});
+
+router.get('/:id/versions', requireAuth, (req, res) => {
+  const node = loadOwnedNode(req, res);
+  if (!node) return;
+  const versions = (node.versions || [])
+    .map((v) => ({ id: v.id, size: v.size, mimeType: v.mimeType, createdAt: v.createdAt }))
+    .sort((a, b) => b.createdAt - a.createdAt);
+  res.json({ versions });
+});
+
+router.get('/:id/versions/:versionId/download', requireAuth, (req, res) => {
+  const node = loadOwnedNode(req, res);
+  if (!node) return;
+  const version = (node.versions || []).find((v) => v.id === req.params.versionId);
+  if (!version) return res.status(404).json({ error: 'Version not found' });
+  streamFile(req, res, { blobName: version.blobName, mimeType: version.mimeType, name: node.name });
+});
+
+router.post('/:id/versions/:versionId/restore', requireFetchHeader, requireAuth, async (req, res) => {
+  const node = loadOwnedNode(req, res);
+  if (!node) return;
+  const versions = node.versions || [];
+  const idx = versions.findIndex((v) => v.id === req.params.versionId);
+  if (idx === -1) return res.status(404).json({ error: 'Version not found' });
+  const version = versions[idx];
+
+  // The version being restored from becomes a version itself, in the same
+  // slot, so restoring is symmetric - you can always undo a restore the
+  // same way, and the total version count never grows from this.
+  versions[idx] = {
+    id: uuid(),
+    blobName: node.blobName,
+    size: node.size,
+    mimeType: node.mimeType,
+    createdAt: node.updatedAt || node.createdAt,
+  };
+  node.versions = versions;
+
+  node.blobName = version.blobName;
+  node.size = version.size;
+  node.mimeType = version.mimeType;
+  node.updatedAt = Date.now();
+  const contentText = await extractText(blobPath(version.blobName), {
+    mimeType: version.mimeType,
+    name: node.name,
+    size: version.size,
+  });
+  if (contentText) node.contentText = contentText;
+  else delete node.contentText;
+
+  logActivity({ userId: req.user.id, username: req.user.username, action: 'restore_version', targetName: node.name });
+  await save();
+  res.json({ item: serialize(node) });
 });
 
 function streamFile(req, res, node) {
