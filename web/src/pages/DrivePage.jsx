@@ -515,7 +515,7 @@ export default function DrivePage() {
           )}
           <input
             className="search-input"
-            placeholder="Search your files… (Ctrl+K)"
+            placeholder="Search names & file contents… (Ctrl+K)"
             value={searchQuery}
             onChange={(e) => {
               const q = e.target.value;

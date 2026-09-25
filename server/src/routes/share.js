@@ -9,6 +9,8 @@ import { getState, save, findNodeById, findUserById, allOwnedBy, logActivity, fi
 import { verifyPassword, requireFetchHeader } from '../auth.js';
 import { isWithin, breadcrumb } from '../lib/tree.js';
 import { streamZip } from '../lib/zip.js';
+import { blobPath } from '../lib/paths.js';
+import { extractText } from '../lib/textExtract.js';
 import { streamFile } from './nodes.js';
 
 const router = Router();
@@ -312,24 +314,29 @@ router.post('/:token/upload', requireFetchHeader, shareUpload.array('files'), as
 
   const state = getState();
   const now = Date.now();
-  const created = (req.files || []).map((file) => {
-    const created = {
+  const created = [];
+  for (const file of req.files || []) {
+    const name = sanitizeName(file.originalname);
+    const mimeType = file.mimetype || mime.lookup(file.originalname) || 'application/octet-stream';
+    const created_ = {
       id: crypto.randomUUID(),
-      name: sanitizeName(file.originalname),
+      name,
       type: 'file',
       parentId: folder.id,
       ownerId: node.ownerId,
       size: file.size,
-      mimeType: file.mimetype || mime.lookup(file.originalname) || 'application/octet-stream',
+      mimeType,
       blobName: file.filename,
       trashed: false,
       trashedAt: null,
       createdAt: now,
       updatedAt: now,
     };
-    state.nodes.push(created);
-    return created;
-  });
+    const contentText = await extractText(blobPath(file.filename), { mimeType, name, size: file.size });
+    if (contentText) created_.contentText = contentText;
+    state.nodes.push(created_);
+    created.push(created_);
+  }
 
   if (created.length) {
     logActivity({

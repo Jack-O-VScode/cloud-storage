@@ -172,6 +172,7 @@ export default function ItemsList({
             <RowIcon item={item} />
             <span className="items-name-text">{item.name}</span>
             {item.shared && <span className="badge">shared</span>}
+            {item.contentMatch && <span className="badge">content match</span>}
             {!trashView && (
               <button
                 className={`star-toggle ${item.starred ? 'starred' : ''}`}

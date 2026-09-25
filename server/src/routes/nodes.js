@@ -22,6 +22,7 @@ import { blobPath, diskUsage } from '../lib/paths.js';
 import { breadcrumb, isSelfOrDescendantMove, descendantsOf } from '../lib/tree.js';
 import { streamZip } from '../lib/zip.js';
 import { purgeNodeBlob } from '../lib/purge.js';
+import { extractText } from '../lib/textExtract.js';
 
 const router = Router();
 
@@ -117,10 +118,19 @@ router.get('/trash', requireAuth, (req, res) => {
 router.get('/search', requireAuth, (req, res) => {
   const q = String(req.query.q || '').trim().toLowerCase();
   if (!q) return res.json({ items: [] });
-  const items = allOwnedBy(req.user.id).filter(
-    (n) => !n.trashed && n.name.toLowerCase().includes(q)
-  );
-  res.json({ items: items.map(serialize) });
+  const items = allOwnedBy(req.user.id).filter((n) => {
+    if (n.trashed) return false;
+    if (n.name.toLowerCase().includes(q)) return true;
+    return Boolean(n.contentText && n.contentText.toLowerCase().includes(q));
+  });
+  // Content-only matches (the query isn't in the name) get flagged so the
+  // UI can explain why a result showed up.
+  res.json({
+    items: items.map((n) => ({
+      ...serialize(n),
+      contentMatch: !n.name.toLowerCase().includes(q) && Boolean(n.contentText),
+    })),
+  });
 });
 
 router.get('/starred', requireAuth, (req, res) => {
@@ -271,7 +281,8 @@ router.post('/upload', requireFetchHeader, requireAuth, upload.array('files'), a
   const created = [];
   const folderCache = new Map();
 
-  (req.files || []).forEach((file, i) => {
+  for (let i = 0; i < (req.files || []).length; i++) {
+    const file = req.files[i];
     let targetParentId = parentId;
     const relPath = relativePaths[i];
     if (relPath) {
@@ -281,23 +292,27 @@ router.post('/upload', requireFetchHeader, requireAuth, upload.array('files'), a
         targetParentId = resolveFolderChain(req.user.id, parentId, segments, folderCache);
       }
     }
+    const name = sanitizeName(file.originalname);
+    const mimeType = file.mimetype || mime.lookup(file.originalname) || 'application/octet-stream';
     const node = {
       id: uuid(),
-      name: sanitizeName(file.originalname),
+      name,
       type: 'file',
       parentId: targetParentId,
       ownerId: req.user.id,
       size: file.size,
-      mimeType: file.mimetype || mime.lookup(file.originalname) || 'application/octet-stream',
+      mimeType,
       blobName: file.filename,
       trashed: false,
       trashedAt: null,
       createdAt: now,
       updatedAt: now,
     };
+    const contentText = await extractText(blobPath(file.filename), { mimeType, name, size: file.size });
+    if (contentText) node.contentText = contentText;
     state.nodes.push(node);
     created.push(node);
-  });
+  }
 
   if (created.length) {
     logActivity({
