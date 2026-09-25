@@ -70,6 +70,11 @@ button {
   display: grid;
   grid-template-columns: 240px 1fr;
   height: 100vh;
+  /* Keeps content clear of the iOS status bar/notch when the app is
+     added to the home screen (its status bar is transparent, so content
+     would otherwise render straight underneath it). A no-op everywhere
+     else, since env() falls back to 0 without safe-area insets. */
+  padding-top: env(safe-area-inset-top);
 }
 
 .sidebar {

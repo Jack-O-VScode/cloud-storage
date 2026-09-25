@@ -91,6 +91,22 @@ export function contrastColor(hex, dark = '#1c1f24', light = '#ffffff') {
   return luminance > 0.5 ? dark : light;
 }
 
+// Keeps the browser's own chrome (the tab/toolbar tint on Android Chrome,
+// an installed PWA's title bar on Windows) in step with whatever bar color
+// is actually showing, instead of the static color baked into index.html/
+// the manifest at build time - falls back to the built-in theme's own bar
+// color for whichever OS light/dark mode is active.
+function updateThemeColorMeta(preferences) {
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (!meta) return;
+  if (preferences.barColor) {
+    meta.setAttribute('content', preferences.barColor);
+    return;
+  }
+  const prefersDark = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  meta.setAttribute('content', prefersDark ? '#16181d' : '#fbfbfc');
+}
+
 // Sets/clears a small set of `--user-*` custom properties that every
 // consuming CSS rule reads with a fallback, e.g. `var(--user-accent-bg,
 // var(--primary))` - so leaving a property unset (System preset) means the
@@ -134,4 +150,6 @@ export function applyTheme(preferences) {
   }
 
   root.style.fontSize = TEXT_SIZE_REM[preferences.textSize] || TEXT_SIZE_REM.normal;
+
+  updateThemeColorMeta(preferences);
 }
