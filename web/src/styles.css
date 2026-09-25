@@ -733,6 +733,22 @@ button {
   padding: 16px 24px;
   border-bottom: 1px solid var(--border);
 }
+.share-browse-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.share-qr {
+  display: flex;
+  justify-content: center;
+  margin: 12px 0;
+}
+.share-qr img {
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  padding: 8px;
+  background: #fff;
+}
 
 /* Settings modal */
 .settings-section-header {

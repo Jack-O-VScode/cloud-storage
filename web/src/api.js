@@ -51,6 +51,9 @@ export const api = {
   emptyTrash: () => request('/nodes/trash', { method: 'DELETE' }),
   share: (id, opts) => request(`/nodes/${id}/share`, { method: 'POST', body: opts || {} }),
   unshare: (id) => request(`/nodes/${id}/share`, { method: 'DELETE' }),
+  shareBundle: (ids) => request('/nodes/share-bundle', { method: 'POST', body: { ids } }),
+  patchShareBundle: (id, opts) => request(`/nodes/share-bundle/${id}`, { method: 'PATCH', body: opts || {} }),
+  deleteShareBundle: (id) => request(`/nodes/share-bundle/${id}`, { method: 'DELETE' }),
 
   usage: () => request('/storage/usage'),
 
@@ -66,6 +69,8 @@ export const api = {
     `${BASE}/share/${token}/download${nodeId ? `?nodeId=${encodeURIComponent(nodeId)}` : ''}`,
   shareZipUrl: (token, nodeId) =>
     `${BASE}/share/${token}/zip${nodeId ? `?nodeId=${encodeURIComponent(nodeId)}` : ''}`,
+  shareUploadUrl: (token, nodeId) =>
+    `${BASE}/share/${token}/upload${nodeId ? `?nodeId=${encodeURIComponent(nodeId)}` : ''}`,
 
   listBackups: () => request('/backups'),
   createFullBackup: () => request('/backups/full', { method: 'POST' }),
@@ -118,6 +123,35 @@ export function uploadFiles(files, parentId, onProgress, relativePaths) {
 
     const xhr = new XMLHttpRequest();
     xhr.open('POST', BASE + '/nodes/upload');
+    xhr.setRequestHeader('X-Requested-With', 'cloud-storage');
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
+    };
+    xhr.onload = () => {
+      let data = {};
+      try {
+        data = JSON.parse(xhr.responseText);
+      } catch {
+        // ignore
+      }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+      else reject(new ApiError(data.error || `Upload failed (${xhr.status})`, xhr.status));
+    };
+    xhr.onerror = () => reject(new ApiError('Network error during upload', 0));
+    xhr.send(form);
+  });
+}
+
+// Public counterpart of uploadFiles() for an upload-enabled shared folder -
+// no session cookie is sent (there isn't one), the share token is the
+// credential instead.
+export function shareUploadFiles(token, files, nodeId, onProgress) {
+  return new Promise((resolve, reject) => {
+    const form = new FormData();
+    for (const file of files) form.append('files', file, file.name);
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', api.shareUploadUrl(token, nodeId));
     xhr.setRequestHeader('X-Requested-With', 'cloud-storage');
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);

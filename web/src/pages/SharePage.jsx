@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { api } from '../api.js';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { api, shareUploadFiles } from '../api.js';
 import Icon from '../components/Icon.jsx';
 import { formatBytes, mimeCategory } from '../utils/format.js';
 
@@ -17,8 +17,10 @@ function FilePreview({ token, item }) {
   return null;
 }
 
+const BUNDLE_ROOT_CRUMB = { id: '__root__', name: 'Shared files' };
+
 export default function SharePage({ token }) {
-  const [meta, setMeta] = useState(null); // { item, passwordRequired }
+  const [meta, setMeta] = useState(null); // { item, passwordRequired } | { bundle, items, passwordRequired }
   const [unlocked, setUnlocked] = useState(false);
   const [password, setPassword] = useState('');
   const [unlockError, setUnlockError] = useState('');
@@ -29,6 +31,12 @@ export default function SharePage({ token }) {
   const [items, setItems] = useState([]);
   const [breadcrumb, setBreadcrumb] = useState([]);
   const [browsing, setBrowsing] = useState(false);
+
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState('');
+  const fileInputRef = useRef(null);
+
+  const isBundle = Boolean(meta?.bundle);
 
   const loadMeta = useCallback(() => {
     api
@@ -60,12 +68,28 @@ export default function SharePage({ token }) {
     [token, meta]
   );
 
+  const loadBundleRoot = useCallback(() => {
+    setBrowsing(true);
+    api
+      .shareList(token)
+      .then((data) => {
+        setItems(data.items);
+        setBreadcrumb([]);
+        setCurrentNode(null);
+      })
+      .catch((e) => setLoadError(e.message))
+      .finally(() => setBrowsing(false));
+  }, [token]);
+
   useEffect(() => {
-    if (unlocked && meta?.item?.type === 'folder') {
+    if (!unlocked) return;
+    if (meta?.bundle) {
+      loadBundleRoot();
+    } else if (meta?.item?.type === 'folder') {
       loadFolder(meta.item.id);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [unlocked, meta?.item?.id]);
+  }, [unlocked, meta?.item?.id, meta?.bundle]);
 
   const unlock = async (e) => {
     e.preventDefault();
@@ -79,6 +103,23 @@ export default function SharePage({ token }) {
       setUnlockError(err.message);
     } finally {
       setUnlocking(false);
+    }
+  };
+
+  const handleUpload = async (fileList) => {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    setUploading(true);
+    setUploadError('');
+    try {
+      await shareUploadFiles(token, files, currentNode?.id);
+      if (currentNode) loadFolder(currentNode.id);
+      else loadFolder(meta.item.id);
+    } catch (err) {
+      setUploadError(err.message);
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
 
@@ -109,7 +150,7 @@ export default function SharePage({ token }) {
         <form className="auth-card" onSubmit={unlock}>
           <h1>Password required</h1>
           <p className="muted">
-            "{meta.item.name}" is password protected.
+            {isBundle ? 'This shared selection is password protected.' : `"${meta.item.name}" is password protected.`}
           </p>
           <label className="field-label">Password</label>
           <input
@@ -128,7 +169,7 @@ export default function SharePage({ token }) {
     );
   }
 
-  if (meta.item.type === 'file') {
+  if (!isBundle && meta.item.type === 'file') {
     return (
       <div className="auth-screen">
         <div className="auth-card share-file-card">
@@ -143,26 +184,43 @@ export default function SharePage({ token }) {
     );
   }
 
-  // Folder: read-only browse view.
+  // Folder or bundle: browsable view.
+  const crumbs = isBundle ? [BUNDLE_ROOT_CRUMB, ...breadcrumb] : breadcrumb;
+
   return (
     <div className="share-browse-screen">
       <div className="share-browse-header">
         <div className="breadcrumb">
-          {breadcrumb.map((b, i) => (
+          {crumbs.map((b, i) => (
             <React.Fragment key={b.id}>
               {i > 0 && <span> / </span>}
-              <button className="link-btn" onClick={() => loadFolder(b.id)}>
+              <button className="link-btn" onClick={() => (b.id === '__root__' ? loadBundleRoot() : loadFolder(b.id))}>
                 {b.name}
               </button>
             </React.Fragment>
           ))}
         </div>
-        {currentNode && (
-          <a className="btn btn-primary" href={api.shareZipUrl(token, currentNode.id)}>
+        <div className="share-browse-actions">
+          {meta.uploadEnabled && !isBundle && (
+            <>
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                style={{ display: 'none' }}
+                onChange={(e) => handleUpload(e.target.files)}
+              />
+              <button className="btn" onClick={() => fileInputRef.current?.click()} disabled={uploading}>
+                {uploading ? 'Uploading…' : 'Upload files'}
+              </button>
+            </>
+          )}
+          <a className="btn btn-primary" href={api.shareZipUrl(token, currentNode?.id)}>
             Download all as zip
           </a>
-        )}
+        </div>
       </div>
+      {uploadError && <p className="form-error" style={{ margin: '0 24px' }}>{uploadError}</p>}
       <div className="items-table">
         <div className="items-header two-col">
           <span>Name</span>

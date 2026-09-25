@@ -6,6 +6,7 @@ import ItemsList from '../components/ItemsList.jsx';
 import TextPromptModal from '../components/TextPromptModal.jsx';
 import MoveModal from '../components/MoveModal.jsx';
 import ShareModal from '../components/ShareModal.jsx';
+import BundleShareModal from '../components/BundleShareModal.jsx';
 import PreviewModal from '../components/PreviewModal.jsx';
 import UsersAdminModal from '../components/UsersAdminModal.jsx';
 import BackupsModal from '../components/BackupsModal.jsx';
@@ -447,6 +448,9 @@ export default function DrivePage() {
                 <button className="btn" onClick={bulkDownload}>
                   Download
                 </button>
+                <button className="btn" onClick={() => setModal({ type: 'bundle-share' })}>
+                  Share
+                </button>
                 <button className="btn" onClick={() => setModal({ type: 'bulk-move' })}>
                   Move
                 </button>
@@ -551,6 +555,10 @@ export default function DrivePage() {
 
       {modal?.type === 'share' && (
         <ShareModal node={modal.node} onChanged={refresh} onClose={() => { closeModal(); refresh(); }} />
+      )}
+
+      {modal?.type === 'bundle-share' && (
+        <BundleShareModal nodeIds={[...selectedIds]} onClose={closeModal} />
       )}
 
       {modal?.type === 'preview' && <PreviewModal node={modal.node} onClose={closeModal} />}

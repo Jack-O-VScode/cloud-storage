@@ -7,7 +7,16 @@ import multer from 'multer';
 import mime from 'mime-types';
 const uuid = crypto.randomUUID;
 import { config } from '../config.js';
-import { getState, save, findNodeById, findUserById, childrenOf, allOwnedBy, logActivity } from '../store.js';
+import {
+  getState,
+  save,
+  findNodeById,
+  findUserById,
+  childrenOf,
+  allOwnedBy,
+  logActivity,
+  findBundleById,
+} from '../store.js';
 import { requireAuth, requireFetchHeader, hashPassword } from '../auth.js';
 import { blobPath, diskUsage } from '../lib/paths.js';
 import { breadcrumb, isSelfOrDescendantMove, descendantsOf } from '../lib/tree.js';
@@ -47,6 +56,20 @@ function serialize(node) {
     shareToken: node.shareToken || null,
     shareExpiresAt: node.shareExpiresAt || null,
     sharePasswordProtected: Boolean(node.sharePasswordHash),
+    shareUploadEnabled: node.type === 'folder' ? Boolean(node.shareUploadEnabled) : false,
+  };
+}
+
+function serializeBundle(bundle) {
+  return {
+    id: bundle.id,
+    token: bundle.token,
+    expiresAt: bundle.expiresAt || null,
+    passwordProtected: Boolean(bundle.passwordHash),
+    items: bundle.nodeIds
+      .map((id) => findNodeById(id))
+      .filter((n) => n && !n.trashed)
+      .map(serialize),
   };
 }
 
@@ -368,7 +391,7 @@ router.delete('/:id', requireFetchHeader, requireAuth, async (req, res) => {
 router.post('/:id/share', requireFetchHeader, requireAuth, (req, res) => {
   const node = loadOwnedNode(req, res);
   if (!node) return;
-  const { expiresInMs, password } = req.body || {};
+  const { expiresInMs, password, uploadEnabled } = req.body || {};
   // Keep the existing token (if any) so changing just the expiry/password
   // doesn't invalidate a link already handed out. Both settings are only
   // touched when explicitly present in the body - the client can't safely
@@ -381,6 +404,9 @@ router.post('/:id/share', requireFetchHeader, requireAuth, (req, res) => {
   if (password !== undefined) {
     node.sharePasswordHash = password ? hashPassword(password) : null;
   }
+  if (uploadEnabled !== undefined && node.type === 'folder') {
+    node.shareUploadEnabled = Boolean(uploadEnabled);
+  }
   logActivity({ userId: req.user.id, username: req.user.username, action: 'share', targetName: node.name });
   save();
   res.json({ item: serialize(node), shareToken: node.shareToken });
@@ -392,9 +418,65 @@ router.delete('/:id/share', requireFetchHeader, requireAuth, (req, res) => {
   node.shareToken = null;
   node.shareExpiresAt = null;
   node.sharePasswordHash = null;
+  node.shareUploadEnabled = false;
   logActivity({ userId: req.user.id, username: req.user.username, action: 'unshare', targetName: node.name });
   save();
   res.json({ item: serialize(node) });
+});
+
+// A "bundle" shares an arbitrary set of files/folders (possibly from
+// different parents) behind one link/token, distinct from the single-node
+// share above which always ties a token to exactly one node's subtree.
+router.post('/share-bundle', requireFetchHeader, requireAuth, (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? [...new Set(req.body.ids)] : [];
+  const items = ids
+    .map((id) => findNodeById(id))
+    .filter((n) => n && n.ownerId === req.user.id && !n.trashed);
+  if (!items.length) return res.status(400).json({ error: 'No items selected' });
+
+  const state = getState();
+  const bundle = {
+    id: uuid(),
+    token: crypto.randomBytes(24).toString('base64url'),
+    ownerId: req.user.id,
+    nodeIds: items.map((n) => n.id),
+    passwordHash: null,
+    expiresAt: null,
+    createdAt: Date.now(),
+  };
+  state.bundles.push(bundle);
+  logActivity({
+    userId: req.user.id,
+    username: req.user.username,
+    action: 'share',
+    targetName: items.length === 1 ? items[0].name : `${items.length} items`,
+  });
+  save();
+  res.status(201).json({ bundle: serializeBundle(bundle) });
+});
+
+router.patch('/share-bundle/:id', requireFetchHeader, requireAuth, (req, res) => {
+  const bundle = findBundleById(req.params.id);
+  if (!bundle || bundle.ownerId !== req.user.id) return res.status(404).json({ error: 'Not found' });
+  const { expiresInMs, password } = req.body || {};
+  if (expiresInMs !== undefined) {
+    bundle.expiresAt = typeof expiresInMs === 'number' && expiresInMs > 0 ? Date.now() + expiresInMs : null;
+  }
+  if (password !== undefined) {
+    bundle.passwordHash = password ? hashPassword(password) : null;
+  }
+  save();
+  res.json({ bundle: serializeBundle(bundle) });
+});
+
+router.delete('/share-bundle/:id', requireFetchHeader, requireAuth, (req, res) => {
+  const bundle = findBundleById(req.params.id);
+  if (!bundle || bundle.ownerId !== req.user.id) return res.status(404).json({ error: 'Not found' });
+  const state = getState();
+  state.bundles = state.bundles.filter((b) => b.id !== bundle.id);
+  logActivity({ userId: req.user.id, username: req.user.username, action: 'unshare', targetName: 'shared selection' });
+  save();
+  res.json({ ok: true });
 });
 
 function streamFile(req, res, node) {

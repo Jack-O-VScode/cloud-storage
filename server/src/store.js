@@ -9,7 +9,7 @@ import { config } from './config.js';
 // object plus a serialized write queue is enough - no native DB dependency
 // to cross-compile for ARM.
 
-let state = { users: [], nodes: [], activity: [] };
+let state = { users: [], nodes: [], activity: [], bundles: [] };
 let writeQueue = Promise.resolve();
 let dirty = false;
 
@@ -28,12 +28,13 @@ export function loadStore() {
       throw new Error(`metadata.json is corrupt and could not be parsed: ${err.message}`);
     }
   } else {
-    state = { users: [], nodes: [] };
+    state = { users: [], nodes: [], activity: [], bundles: [] };
     persistNow();
   }
   state.users ||= [];
   state.nodes ||= [];
   state.activity ||= [];
+  state.bundles ||= [];
   return state;
 }
 
@@ -84,6 +85,14 @@ export function childrenOf(ownerId, parentId, { includeTrashed = false } = {}) {
 
 export function allOwnedBy(ownerId) {
   return state.nodes.filter((n) => n.ownerId === ownerId);
+}
+
+export function findBundleById(id) {
+  return state.bundles.find((b) => b.id === id);
+}
+
+export function findBundleByToken(token) {
+  return state.bundles.find((b) => b.token === token);
 }
 
 const MAX_ACTIVITY_ENTRIES = 1000;

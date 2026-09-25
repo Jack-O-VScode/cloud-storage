@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import QRCode from 'qrcode';
 import Modal from './Modal.jsx';
 import { api } from '../api.js';
 
@@ -25,13 +26,29 @@ export default function ShareModal({ node, onChanged, onClose }) {
   const [shareToken, setShareToken] = useState(node.shareToken || null);
   const [expiresAt, setExpiresAt] = useState(node.shareExpiresAt || null);
   const [passwordProtected, setPasswordProtected] = useState(node.sharePasswordProtected || false);
+  const [uploadEnabled, setUploadEnabled] = useState(node.shareUploadEnabled || false);
 
   const [expiryChoice, setExpiryChoice] = useState(shareToken ? 'keep' : 'never');
   const [password, setPassword] = useState('');
   const [removePassword, setRemovePassword] = useState(false);
   const [error, setError] = useState('');
+  const [qrDataUrl, setQrDataUrl] = useState(null);
 
   const link = shareToken ? `${window.location.origin}/s/${shareToken}` : null;
+
+  useEffect(() => {
+    if (!link) {
+      setQrDataUrl(null);
+      return;
+    }
+    let cancelled = false;
+    QRCode.toDataURL(link, { margin: 1, width: 220 })
+      .then((url) => !cancelled && setQrDataUrl(url))
+      .catch(() => !cancelled && setQrDataUrl(null));
+    return () => {
+      cancelled = true;
+    };
+  }, [link]);
 
   const submit = async () => {
     setBusy(true);
@@ -43,11 +60,13 @@ export default function ShareModal({ node, onChanged, onClose }) {
       }
       if (removePassword) body.password = '';
       else if (password) body.password = password;
+      if (node.type === 'folder') body.uploadEnabled = uploadEnabled;
 
       const { shareToken: token, item } = await api.share(node.id, body);
       setShareToken(token);
       setExpiresAt(item.shareExpiresAt);
       setPasswordProtected(item.sharePasswordProtected);
+      setUploadEnabled(item.shareUploadEnabled);
       setExpiryChoice('keep');
       setPassword('');
       setRemovePassword(false);
@@ -66,6 +85,7 @@ export default function ShareModal({ node, onChanged, onClose }) {
       setShareToken(null);
       setExpiresAt(null);
       setPasswordProtected(false);
+      setUploadEnabled(false);
       onChanged?.();
     } finally {
       setBusy(false);
@@ -106,10 +126,22 @@ export default function ShareModal({ node, onChanged, onClose }) {
             </button>
           </div>
           <p className="muted small">{formatExpiry(expiresAt)}</p>
+          {qrDataUrl && (
+            <div className="share-qr">
+              <img src={qrDataUrl} alt="QR code for share link" width={160} height={160} />
+            </div>
+          )}
         </>
       )}
 
       <hr className="divider" />
+
+      {node.type === 'folder' && (
+        <label className="checkbox-row">
+          <input type="checkbox" checked={uploadEnabled} onChange={(e) => setUploadEnabled(e.target.checked)} />
+          Let visitors upload files into this folder
+        </label>
+      )}
 
       <label className="field-label">Expiry</label>
       <select className="text-input" value={expiryChoice} onChange={(e) => setExpiryChoice(e.target.value)}>
