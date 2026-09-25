@@ -59,6 +59,12 @@ export const api = {
 
   usage: () => request('/storage/usage'),
 
+  listGrantsForFolder: (folderId) => request(`/grants/for-folder/${folderId}`),
+  createGrant: (folderId, granteeUsername, permission) =>
+    request('/grants', { method: 'POST', body: { folderId, granteeUsername, permission } }),
+  deleteGrant: (id) => request(`/grants/${id}`, { method: 'DELETE' }),
+  listSharedWithMe: () => request('/grants/shared-with-me'),
+
   listComments: (id) => request(`/nodes/${id}/comments`),
   addComment: (id, text) => request(`/nodes/${id}/comments`, { method: 'POST', body: { text } }),
   deleteComment: (id, commentId) => request(`/nodes/${id}/comments/${commentId}`, { method: 'DELETE' }),

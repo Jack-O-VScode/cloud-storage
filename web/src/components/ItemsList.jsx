@@ -15,23 +15,32 @@ function useOutsideClose(ref, onClose) {
   }, [ref, onClose]);
 }
 
-function RowMenu({ node, trashView, actions, onClose }) {
+function RowMenu({ node, trashView, actions, viewerRole, onClose }) {
   const ref = useRef(null);
   useOutsideClose(ref, onClose);
   const canNativeShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
+  const isOwner = viewerRole === 'owner';
+  const canEdit = isOwner || viewerRole === 'edit';
 
   return (
     <div className="row-menu" ref={ref}>
       {!trashView && (
         <>
           <button onClick={() => actions.download(node)}>Download</button>
-          <button onClick={() => actions.copyShareLink(node)}>Copy share link</button>
-          {canNativeShare && <button onClick={() => actions.nativeShare(node)}>Share via…</button>}
-          <button onClick={() => actions.share(node)}>Share settings</button>
-          <button onClick={() => actions.toggleStar(node)}>
-            {node.starred ? 'Remove from Starred' : 'Add to Starred'}
-          </button>
-          {node.type === 'file' && (
+          {isOwner && (
+            <>
+              <button onClick={() => actions.copyShareLink(node)}>Copy share link</button>
+              {canNativeShare && <button onClick={() => actions.nativeShare(node)}>Share via…</button>}
+              <button onClick={() => actions.share(node)}>Share settings</button>
+              {node.type === 'folder' && (
+                <button onClick={() => actions.manageAccess(node)}>Manage access</button>
+              )}
+              <button onClick={() => actions.toggleStar(node)}>
+                {node.starred ? 'Remove from Starred' : 'Add to Starred'}
+              </button>
+            </>
+          )}
+          {node.type === 'file' && canEdit && (
             <>
               <button onClick={() => actions.uploadVersion(node)}>Upload new version</button>
               <button onClick={() => actions.versionHistory(node)}>
@@ -42,11 +51,15 @@ function RowMenu({ node, trashView, actions, onClose }) {
           <button onClick={() => actions.comments(node)}>
             Comments{node.commentCount ? ` (${node.commentCount})` : ''}
           </button>
-          <button onClick={() => actions.rename(node)}>Rename</button>
-          <button onClick={() => actions.move(node)}>Move</button>
-          <button className="danger" onClick={() => actions.trash(node)}>
-            Move to trash
-          </button>
+          {canEdit && (
+            <>
+              <button onClick={() => actions.rename(node)}>Rename</button>
+              {isOwner && <button onClick={() => actions.move(node)}>Move</button>}
+              <button className="danger" onClick={() => actions.trash(node)}>
+                Move to trash
+              </button>
+            </>
+          )}
         </>
       )}
       {trashView && (
@@ -91,6 +104,7 @@ export default function ItemsList({
   sortDir,
   onSortChange,
   onMoveItem,
+  viewerRole = 'owner',
 }) {
   const [openMenu, setOpenMenu] = useState(null);
   const [dragOverId, setDragOverId] = useState(null);
@@ -100,7 +114,7 @@ export default function ItemsList({
   }
 
   const allSelected = items.length > 0 && items.every((i) => selectedIds.has(i.id));
-  const canDrag = !trashView && Boolean(onMoveItem);
+  const canDrag = !trashView && Boolean(onMoveItem) && viewerRole === 'owner';
 
   return (
     <div className="items-table">
@@ -184,7 +198,7 @@ export default function ItemsList({
             <span className="items-name-text">{item.name}</span>
             {item.shared && <span className="badge">shared</span>}
             {item.contentMatch && <span className="badge">content match</span>}
-            {!trashView && (
+            {!trashView && viewerRole === 'owner' && (
               <button
                 className={`star-toggle ${item.starred ? 'starred' : ''}`}
                 onClick={(e) => {
@@ -209,6 +223,7 @@ export default function ItemsList({
                 node={item}
                 trashView={trashView}
                 actions={actions}
+                viewerRole={viewerRole}
                 onClose={() => setOpenMenu(null)}
               />
             )}

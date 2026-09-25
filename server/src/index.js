@@ -12,6 +12,7 @@ import shareRoutes from './routes/share.js';
 import storageRoutes from './routes/storage.js';
 import backupRoutes from './routes/backups.js';
 import activityRoutes from './routes/activity.js';
+import grantRoutes from './routes/grants.js';
 import { scheduleTrashSweep } from './lib/trashSweep.js';
 import { scheduleMetadataBackups } from './lib/backup.js';
 
@@ -39,6 +40,7 @@ app.use('/api/share', shareRoutes);
 app.use('/api/storage', storageRoutes);
 app.use('/api/backups', backupRoutes);
 app.use('/api/activity', activityRoutes);
+app.use('/api/grants', grantRoutes);
 
 scheduleTrashSweep();
 scheduleMetadataBackups();

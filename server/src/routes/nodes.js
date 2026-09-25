@@ -19,10 +19,11 @@ import {
 } from '../store.js';
 import { requireAuth, requireFetchHeader, hashPassword } from '../auth.js';
 import { blobPath, diskUsage } from '../lib/paths.js';
-import { breadcrumb, isSelfOrDescendantMove, descendantsOf } from '../lib/tree.js';
+import { isSelfOrDescendantMove, descendantsOf } from '../lib/tree.js';
 import { streamZip } from '../lib/zip.js';
 import { purgeNodeBlob } from '../lib/purge.js';
 import { extractText } from '../lib/textExtract.js';
+import { hasAccess, breadcrumbFor } from '../lib/access.js';
 
 const router = Router();
 
@@ -81,7 +82,9 @@ function serializeBundle(bundle) {
   };
 }
 
-// Ownership + existence guard shared by every mutating route below.
+// Ownership + existence guard for routes that stay owner-only even for a
+// collaborator with edit access - sharing/grant management and permanent
+// delete/trash management.
 function loadOwnedNode(req, res) {
   const node = findNodeById(req.params.id);
   if (!node || node.ownerId !== req.user.id) {
@@ -91,27 +94,48 @@ function loadOwnedNode(req, res) {
   return node;
 }
 
-function assertParentIsUsableFolder(req, res, parentId) {
+// Like loadOwnedNode, but also succeeds for a collaborator who holds at
+// least `requiredLevel` access via a grant on an ancestor folder. A grantee
+// can never reach into trash - only the owner's own trash view/actions do.
+function loadAccessibleNode(req, res, requiredLevel = 'view') {
+  const node = findNodeById(req.params.id);
+  if (!node) {
+    res.status(404).json({ error: 'Not found' });
+    return null;
+  }
+  if (node.ownerId === req.user.id) return node;
+  if (!node.trashed && hasAccess(node, req.user.id, requiredLevel)) return node;
+  res.status(404).json({ error: 'Not found' });
+  return null;
+}
+
+function assertParentIsUsableFolder(req, res, parentId, requiredLevel = 'view') {
   if (parentId === null) return true;
   const parent = findNodeById(parentId);
-  if (!parent || parent.ownerId !== req.user.id || parent.type !== 'folder' || parent.trashed) {
+  if (!parent || parent.type !== 'folder' || parent.trashed) {
     res.status(400).json({ error: 'Destination folder does not exist' });
     return false;
   }
-  return true;
+  if (parent.ownerId === req.user.id || hasAccess(parent, req.user.id, requiredLevel)) return true;
+  res.status(400).json({ error: 'Destination folder does not exist' });
+  return false;
 }
 
 router.get('/', requireAuth, (req, res) => {
   const parentId = fromClientParentId(req.query.parentId);
-  if (!assertParentIsUsableFolder(req, res, parentId)) return;
-  const items = childrenOf(req.user.id, parentId).sort((a, b) => {
-    if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
-    return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
-  });
+  if (!assertParentIsUsableFolder(req, res, parentId, 'view')) return;
   const parent = parentId ? findNodeById(parentId) : null;
+  // A null parentId always means "my own drive root" - a grant can only
+  // ever target a specific folder, never someone else's whole root.
+  const items = (parent ? getState().nodes.filter((n) => n.parentId === parent.id && !n.trashed) : childrenOf(req.user.id, parentId)).sort(
+    (a, b) => {
+      if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
+      return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+    }
+  );
   res.json({
     items: items.map(serialize),
-    breadcrumb: parent ? breadcrumb(parent).map(serialize) : [],
+    breadcrumb: parent ? breadcrumbFor(parent, req.user.id).map(serialize) : [],
   });
 });
 
@@ -159,16 +183,21 @@ router.get('/recent', requireAuth, (req, res) => {
 });
 
 router.get('/:id', requireAuth, (req, res) => {
-  const node = loadOwnedNode(req, res);
+  const node = loadAccessibleNode(req, res, 'view');
   if (!node) return;
-  res.json({ item: serialize(node), breadcrumb: breadcrumb(node).map(serialize) });
+  res.json({ item: serialize(node), breadcrumb: breadcrumbFor(node, req.user.id).map(serialize) });
 });
 
 router.post('/folder', requireFetchHeader, requireAuth, (req, res) => {
   const rawName = String(req.body?.name || '').trim();
   const parentId = fromClientParentId(req.body?.parentId);
   if (!rawName) return res.status(400).json({ error: 'Folder name is required' });
-  if (!assertParentIsUsableFolder(req, res, parentId)) return;
+  if (!assertParentIsUsableFolder(req, res, parentId, 'upload')) return;
+  // A folder created inside someone else's shared folder belongs to THEM
+  // (like the existing upload-enabled public share links), not the
+  // collaborator who created it.
+  const parent = parentId ? findNodeById(parentId) : null;
+  const ownerId = parent ? parent.ownerId : req.user.id;
   const state = getState();
   const now = Date.now();
   const node = {
@@ -176,7 +205,7 @@ router.post('/folder', requireFetchHeader, requireAuth, (req, res) => {
     name: sanitizeName(rawName),
     type: 'folder',
     parentId,
-    ownerId: req.user.id,
+    ownerId,
     trashed: false,
     trashedAt: null,
     createdAt: now,
@@ -249,22 +278,27 @@ function resolveFolderChain(ownerId, baseParentId, segments, cache) {
 
 router.post('/upload', requireFetchHeader, requireAuth, upload.array('files'), async (req, res) => {
   const parentId = fromClientParentId(req.body?.parentId);
-  if (!assertParentIsUsableFolder(req, res, parentId)) {
+  if (!assertParentIsUsableFolder(req, res, parentId, 'upload')) {
     // Clean up anything multer already wrote to disk before we reject.
     await Promise.all((req.files || []).map((f) => fsp.unlink(f.path).catch(() => {})));
     return;
   }
+  // Uploading into someone else's shared folder counts against THEIR quota
+  // and creates files THEY own, same as the existing upload-enabled public
+  // share links - not the collaborator doing the uploading.
+  const parent = parentId ? findNodeById(parentId) : null;
+  const ownerId = parent ? parent.ownerId : req.user.id;
 
-  const quotaBytes = findUserById(req.user.id)?.quotaBytes;
+  const quotaBytes = findUserById(ownerId)?.quotaBytes;
   if (quotaBytes) {
     const incomingBytes = (req.files || []).reduce((sum, f) => sum + f.size, 0);
-    const currentlyUsed = allOwnedBy(req.user.id)
+    const currentlyUsed = allOwnedBy(ownerId)
       .filter((n) => n.type === 'file' && !n.trashed)
       .reduce((sum, n) => sum + (n.size || 0), 0);
     if (currentlyUsed + incomingBytes > quotaBytes) {
       await Promise.all((req.files || []).map((f) => fsp.unlink(f.path).catch(() => {})));
       return res.status(413).json({
-        error: `This upload would exceed your storage quota (${(quotaBytes / 1e9).toFixed(1)}GB). Free up space or ask an admin to raise your quota.`,
+        error: `This upload would exceed the storage quota (${(quotaBytes / 1e9).toFixed(1)}GB). Free up space or ask an admin to raise the quota.`,
       });
     }
   }
@@ -295,7 +329,7 @@ router.post('/upload', requireFetchHeader, requireAuth, upload.array('files'), a
       const segments = relPath.split('/').filter(Boolean);
       segments.pop(); // last segment is the filename itself, not a folder
       if (segments.length) {
-        targetParentId = resolveFolderChain(req.user.id, parentId, segments, folderCache);
+        targetParentId = resolveFolderChain(ownerId, parentId, segments, folderCache);
       }
     }
     const name = sanitizeName(file.originalname);
@@ -305,7 +339,7 @@ router.post('/upload', requireFetchHeader, requireAuth, upload.array('files'), a
       name,
       type: 'file',
       parentId: targetParentId,
-      ownerId: req.user.id,
+      ownerId,
       size: file.size,
       mimeType,
       blobName: file.filename,
@@ -336,14 +370,14 @@ router.post('/zip', requireFetchHeader, requireAuth, async (req, res) => {
   const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
   const nodes = ids
     .map((id) => findNodeById(id))
-    .filter((n) => n && n.ownerId === req.user.id && !n.trashed);
+    .filter((n) => n && !n.trashed && (n.ownerId === req.user.id || hasAccess(n, req.user.id, 'view')));
   if (!nodes.length) return res.status(400).json({ error: 'No items selected' });
   const zipName = nodes.length === 1 ? `${nodes[0].name}.zip` : 'download.zip';
   await streamZip(res, nodes, zipName);
 });
 
 router.patch('/:id', requireFetchHeader, requireAuth, (req, res) => {
-  const node = loadOwnedNode(req, res);
+  const node = loadAccessibleNode(req, res, 'edit');
   if (!node) return;
   const { name, parentId, trashed, starred } = req.body || {};
   const activityBase = { userId: req.user.id, username: req.user.username };
@@ -362,7 +396,15 @@ router.patch('/:id', requireFetchHeader, requireAuth, (req, res) => {
 
   if (parentId !== undefined) {
     const targetParentId = fromClientParentId(parentId);
-    if (!assertParentIsUsableFolder(req, res, targetParentId)) return;
+    if (!assertParentIsUsableFolder(req, res, targetParentId, 'edit')) return;
+    // A move can never cross into a different owner's tree - ownership is
+    // tracked only via ownerId, not by where a node happens to sit, so
+    // "moving" a shared item into your own drive would silently orphan it
+    // from both the owner's and your own view of their storage.
+    const targetOwnerId = targetParentId ? findNodeById(targetParentId).ownerId : req.user.id;
+    if (targetOwnerId !== node.ownerId) {
+      return res.status(400).json({ error: "Can't move a shared item outside its owner's drive" });
+    }
     if (node.type === 'folder' && isSelfOrDescendantMove(node.id, targetParentId)) {
       return res.status(400).json({ error: "Can't move a folder into itself" });
     }
@@ -386,7 +428,10 @@ router.patch('/:id', requireFetchHeader, requireAuth, (req, res) => {
 
   // Starring is metadata about the node, not a change to it - it shouldn't
   // bump updatedAt, since that timestamp drives the "Recent files" view.
-  if (typeof starred === 'boolean') {
+  // It's also personal to the owner's own dashboard (there's one boolean
+  // per node, not per viewer), so a collaborator can't star someone else's
+  // shared item into view.
+  if (typeof starred === 'boolean' && node.ownerId === req.user.id) {
     node.starred = starred;
   }
 
@@ -536,7 +581,7 @@ const MAX_VERSIONS = 10;
 // keeps the previous blob around as a version instead of overwriting it
 // silently, so a bad overwrite is always recoverable.
 router.post('/:id/version', requireFetchHeader, requireAuth, upload.single('file'), async (req, res) => {
-  const node = loadOwnedNode(req, res);
+  const node = loadAccessibleNode(req, res, 'edit');
   if (!node) {
     if (req.file) await fsp.unlink(req.file.path).catch(() => {});
     return;
@@ -547,9 +592,9 @@ router.post('/:id/version', requireFetchHeader, requireAuth, upload.single('file
   }
   if (!req.file) return res.status(400).json({ error: 'No file provided' });
 
-  const quotaBytes = findUserById(req.user.id)?.quotaBytes;
+  const quotaBytes = findUserById(node.ownerId)?.quotaBytes;
   if (quotaBytes) {
-    const currentlyUsed = allOwnedBy(req.user.id)
+    const currentlyUsed = allOwnedBy(node.ownerId)
       .filter((n) => n.type === 'file' && !n.trashed)
       .reduce((sum, n) => sum + (n.size || 0), 0);
     const netIncrease = req.file.size - (node.size || 0);
@@ -587,7 +632,7 @@ router.post('/:id/version', requireFetchHeader, requireAuth, upload.single('file
 });
 
 router.get('/:id/versions', requireAuth, (req, res) => {
-  const node = loadOwnedNode(req, res);
+  const node = loadAccessibleNode(req, res, 'view');
   if (!node) return;
   const versions = (node.versions || [])
     .map((v) => ({ id: v.id, size: v.size, mimeType: v.mimeType, createdAt: v.createdAt }))
@@ -596,7 +641,7 @@ router.get('/:id/versions', requireAuth, (req, res) => {
 });
 
 router.get('/:id/versions/:versionId/download', requireAuth, (req, res) => {
-  const node = loadOwnedNode(req, res);
+  const node = loadAccessibleNode(req, res, 'view');
   if (!node) return;
   const version = (node.versions || []).find((v) => v.id === req.params.versionId);
   if (!version) return res.status(404).json({ error: 'Version not found' });
@@ -604,7 +649,7 @@ router.get('/:id/versions/:versionId/download', requireAuth, (req, res) => {
 });
 
 router.post('/:id/versions/:versionId/restore', requireFetchHeader, requireAuth, async (req, res) => {
-  const node = loadOwnedNode(req, res);
+  const node = loadAccessibleNode(req, res, 'edit');
   if (!node) return;
   const versions = node.versions || [];
   const idx = versions.findIndex((v) => v.id === req.params.versionId);
@@ -643,13 +688,13 @@ router.post('/:id/versions/:versionId/restore', requireFetchHeader, requireAuth,
 const MAX_COMMENT_LENGTH = 2000;
 
 router.get('/:id/comments', requireAuth, (req, res) => {
-  const node = loadOwnedNode(req, res);
+  const node = loadAccessibleNode(req, res, 'view');
   if (!node) return;
   res.json({ comments: (node.comments || []).map(serializeComment) });
 });
 
 router.post('/:id/comments', requireFetchHeader, requireAuth, (req, res) => {
-  const node = loadOwnedNode(req, res);
+  const node = loadAccessibleNode(req, res, 'view');
   if (!node) return;
   const text = String(req.body?.text || '').trim();
   if (!text) return res.status(400).json({ error: 'Comment cannot be empty' });
@@ -670,11 +715,14 @@ router.post('/:id/comments', requireFetchHeader, requireAuth, (req, res) => {
 });
 
 router.delete('/:id/comments/:commentId', requireFetchHeader, requireAuth, (req, res) => {
-  const node = loadOwnedNode(req, res);
+  const node = loadAccessibleNode(req, res, 'view');
   if (!node) return;
   const comments = node.comments || [];
   const comment = comments.find((c) => c.id === req.params.commentId);
   if (!comment) return res.status(404).json({ error: 'Comment not found' });
+  // Only the person who wrote a comment can remove it - "view" access to
+  // the node is not moderation rights over other people's notes on it.
+  if (comment.userId !== req.user.id) return res.status(403).json({ error: 'Not your comment' });
   node.comments = comments.filter((c) => c.id !== comment.id);
   save();
   res.json({ comments: node.comments.map(serializeComment) });
@@ -712,7 +760,7 @@ function streamFile(req, res, node) {
 }
 
 router.get('/:id/download', requireAuth, (req, res) => {
-  const node = loadOwnedNode(req, res);
+  const node = loadAccessibleNode(req, res, 'view');
   if (!node) return;
   if (node.type !== 'file') return res.status(400).json({ error: 'Not a file' });
   streamFile(req, res, node);

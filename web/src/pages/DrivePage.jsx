@@ -3,6 +3,7 @@ import { api, uploadFiles, uploadVersion, downloadZip } from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useToast } from '../components/Toasts.jsx';
 import ItemsList from '../components/ItemsList.jsx';
+import Icon from '../components/Icon.jsx';
 import TextPromptModal from '../components/TextPromptModal.jsx';
 import MoveModal from '../components/MoveModal.jsx';
 import ShareModal from '../components/ShareModal.jsx';
@@ -16,6 +17,7 @@ import StorageModal from '../components/StorageModal.jsx';
 import CommandPalette from '../components/CommandPalette.jsx';
 import VersionHistoryModal from '../components/VersionHistoryModal.jsx';
 import CommentsModal from '../components/CommentsModal.jsx';
+import AccessModal from '../components/AccessModal.jsx';
 import { ConfirmDialog } from '../components/Modal.jsx';
 import { formatBytes } from '../utils/format.js';
 import { filesToEntries, collectFilesFromDataTransfer } from '../utils/collectFiles.js';
@@ -24,11 +26,17 @@ export default function DrivePage() {
   const { user, logout } = useAuth();
   const toast = useToast();
 
-  const [view, setView] = useState('browse'); // browse | trash | search | starred | recent
+  const [view, setView] = useState('browse'); // browse | trash | search | starred | recent | shared-with-me
   const [parentId, setParentId] = useState('root');
   const [breadcrumb, setBreadcrumb] = useState([]);
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
+  // Set while browsing inside a folder someone else granted us access to -
+  // `sharedPermission` is the level of that grant (view/upload/edit), and
+  // gates which actions the UI offers for the whole session.
+  const [sharedMode, setSharedMode] = useState(false);
+  const [sharedPermission, setSharedPermission] = useState(null);
+  const [sharedFolders, setSharedFolders] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [usage, setUsage] = useState(null);
   const [dragActive, setDragActive] = useState(false);
@@ -95,6 +103,11 @@ export default function DrivePage() {
         const data = await api.listRecent();
         setItems(data.items);
         setBreadcrumb([]);
+      } else if (view === 'shared-with-me') {
+        const data = await api.listSharedWithMe();
+        setSharedFolders(data.items);
+        setItems([]);
+        setBreadcrumb([]);
       } else {
         const data = await api.listNodes(parentId);
         setItems(data.items);
@@ -122,11 +135,20 @@ export default function DrivePage() {
   const goRoot = () => {
     setView('browse');
     setParentId('root');
+    setSharedMode(false);
+    setSharedPermission(null);
   };
 
   const openFolder = (id) => {
     setView('browse');
     setParentId(id);
+  };
+
+  const openSharedFolder = (entry) => {
+    setSharedMode(true);
+    setSharedPermission(entry.permission);
+    setView('browse');
+    setParentId(entry.id);
   };
 
   const openItem = (node) => {
@@ -290,7 +312,15 @@ export default function DrivePage() {
     },
     versionHistory: (node) => setModal({ type: 'version-history', node }),
     comments: (node) => setModal({ type: 'comments', node }),
+    manageAccess: (node) => setModal({ type: 'access', node }),
   };
+
+  // sharedMode only ever applies while actively browsing inside a shared
+  // folder (view === 'browse') - every other view (Trash, Starred, Recent,
+  // Search) is always scoped to the current user's own items regardless of
+  // whatever shared folder they last had open, so it always reads as owner.
+  const viewerRole = view === 'browse' && sharedMode ? sharedPermission : 'owner';
+  const canEditHere = viewerRole === 'owner' || viewerRole === 'edit';
 
   const toggleSelect = (id) => {
     setSelectedIds((prev) => {
@@ -347,6 +377,7 @@ export default function DrivePage() {
     { id: 'go-my-drive', label: 'Go to My Drive', run: goRoot },
     { id: 'go-starred', label: 'Go to Starred', run: () => setView('starred') },
     { id: 'go-recent', label: 'Go to Recent', run: () => setView('recent') },
+    { id: 'go-shared', label: 'Go to Shared with me', run: () => setView('shared-with-me') },
     { id: 'go-trash', label: 'Go to Trash', run: () => setView('trash') },
     { id: 'settings', label: 'Open Settings', run: () => setModal({ type: 'settings' }) },
     { id: 'storage', label: 'Storage details', run: () => setModal({ type: 'storage' }) },
@@ -370,13 +401,25 @@ export default function DrivePage() {
     >
       <aside className="sidebar">
         <div className="brand">☁️ Cloud Storage</div>
-        <button className="btn btn-primary btn-block new-btn" onClick={() => setModal({ type: 'new-folder' })}>
+        <button
+          className="btn btn-primary btn-block new-btn"
+          onClick={() => setModal({ type: 'new-folder' })}
+          disabled={sharedMode && viewerRole === 'view'}
+        >
           + New folder
         </button>
-        <button className="btn btn-block" onClick={() => fileInputRef.current?.click()}>
+        <button
+          className="btn btn-block"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={sharedMode && viewerRole === 'view'}
+        >
           Upload files
         </button>
-        <button className="btn btn-block" onClick={() => folderInputRef.current?.click()}>
+        <button
+          className="btn btn-block"
+          onClick={() => folderInputRef.current?.click()}
+          disabled={sharedMode && viewerRole === 'view'}
+        >
           Upload folder
         </button>
         <input
@@ -445,6 +488,12 @@ export default function DrivePage() {
             Recent
           </button>
           <button
+            className={`side-nav-item ${view === 'shared-with-me' ? 'active' : ''}`}
+            onClick={() => setView('shared-with-me')}
+          >
+            Shared with me
+          </button>
+          <button
             className={`side-nav-item ${view === 'trash' ? 'active' : ''}`}
             onClick={() => setView('trash')}
           >
@@ -510,8 +559,11 @@ export default function DrivePage() {
         <div className="top-bar">
           {view === 'browse' && (
             <div className="breadcrumb">
-              <button className="link-btn" onClick={goRoot}>
-                My Drive
+              <button
+                className="link-btn"
+                onClick={() => (sharedMode ? setView('shared-with-me') : goRoot())}
+              >
+                {sharedMode ? 'Shared with me' : 'My Drive'}
               </button>
               {breadcrumb.map((b) => (
                 <React.Fragment key={b.id}>
@@ -543,6 +595,11 @@ export default function DrivePage() {
               <strong>Recent</strong>
             </div>
           )}
+          {view === 'shared-with-me' && (
+            <div className="breadcrumb">
+              <strong>Shared with me</strong>
+            </div>
+          )}
           <input
             className="search-input"
             placeholder="Search names & file contents… (Ctrl+K)"
@@ -569,15 +626,21 @@ export default function DrivePage() {
                 <button className="btn" onClick={bulkDownload}>
                   Download
                 </button>
-                <button className="btn" onClick={() => setModal({ type: 'bundle-share' })}>
-                  Share
-                </button>
-                <button className="btn" onClick={() => setModal({ type: 'bulk-move' })}>
-                  Move
-                </button>
-                <button className="btn btn-danger" onClick={bulkTrash}>
-                  Move to trash
-                </button>
+                {!sharedMode && (
+                  <>
+                    <button className="btn" onClick={() => setModal({ type: 'bundle-share' })}>
+                      Share
+                    </button>
+                    <button className="btn" onClick={() => setModal({ type: 'bulk-move' })}>
+                      Move
+                    </button>
+                  </>
+                )}
+                {canEditHere && (
+                  <button className="btn btn-danger" onClick={bulkTrash}>
+                    Move to trash
+                  </button>
+                )}
               </>
             ) : (
               <>
@@ -599,6 +662,20 @@ export default function DrivePage() {
 
         {loading ? (
           <div className="empty-state">Loading…</div>
+        ) : view === 'shared-with-me' ? (
+          <div className="shared-list">
+            {sharedFolders.length === 0 && (
+              <div className="empty-state">Nobody has shared a folder with you yet.</div>
+            )}
+            {sharedFolders.map((f) => (
+              <button key={f.id} className="shared-row" onClick={() => openSharedFolder(f)}>
+                <Icon category="folder" size={20} />
+                <span className="shared-row-name">{f.name}</span>
+                <span className="muted small">Shared by {f.ownerUsername}</span>
+                <span className="badge">{f.permission}</span>
+              </button>
+            ))}
+          </div>
         ) : (
           <ItemsList
             items={sortedItems}
@@ -611,7 +688,8 @@ export default function DrivePage() {
             sortBy={sortBy}
             sortDir={sortDir}
             onSortChange={view === 'browse' || view === 'starred' || view === 'recent' ? onSortChange : undefined}
-            onMoveItem={view === 'browse' ? onMoveItem : undefined}
+            onMoveItem={view === 'browse' && !sharedMode ? onMoveItem : undefined}
+            viewerRole={viewerRole}
           />
         )}
       </main>
@@ -760,6 +838,8 @@ export default function DrivePage() {
       {modal?.type === 'comments' && (
         <CommentsModal node={modal.node} onChanged={refresh} onClose={closeModal} />
       )}
+
+      {modal?.type === 'access' && <AccessModal node={modal.node} onClose={closeModal} />}
 
       <CommandPalette
         open={paletteOpen}

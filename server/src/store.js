@@ -9,7 +9,7 @@ import { config } from './config.js';
 // object plus a serialized write queue is enough - no native DB dependency
 // to cross-compile for ARM.
 
-let state = { users: [], nodes: [], activity: [], bundles: [] };
+let state = { users: [], nodes: [], activity: [], bundles: [], grants: [] };
 let writeQueue = Promise.resolve();
 let dirty = false;
 
@@ -28,13 +28,14 @@ export function loadStore() {
       throw new Error(`metadata.json is corrupt and could not be parsed: ${err.message}`);
     }
   } else {
-    state = { users: [], nodes: [], activity: [], bundles: [] };
+    state = { users: [], nodes: [], activity: [], bundles: [], grants: [] };
     persistNow();
   }
   state.users ||= [];
   state.nodes ||= [];
   state.activity ||= [];
   state.bundles ||= [];
+  state.grants ||= [];
   return state;
 }
 
@@ -93,6 +94,22 @@ export function findBundleById(id) {
 
 export function findBundleByToken(token) {
   return state.bundles.find((b) => b.token === token);
+}
+
+export function findGrantById(id) {
+  return state.grants.find((g) => g.id === id);
+}
+
+export function findGrant(folderId, granteeUserId) {
+  return state.grants.find((g) => g.folderId === folderId && g.granteeUserId === granteeUserId);
+}
+
+export function grantsForFolder(folderId) {
+  return state.grants.filter((g) => g.folderId === folderId);
+}
+
+export function grantsForUser(userId) {
+  return state.grants.filter((g) => g.granteeUserId === userId);
 }
 
 const MAX_ACTIVITY_ENTRIES = 1000;
