@@ -13,6 +13,7 @@ import BackupsModal from '../components/BackupsModal.jsx';
 import ActivityModal from '../components/ActivityModal.jsx';
 import SettingsModal from '../components/SettingsModal.jsx';
 import StorageModal from '../components/StorageModal.jsx';
+import CommandPalette from '../components/CommandPalette.jsx';
 import { ConfirmDialog } from '../components/Modal.jsx';
 import { formatBytes } from '../utils/format.js';
 import { filesToEntries, collectFilesFromDataTransfer } from '../utils/collectFiles.js';
@@ -36,6 +37,7 @@ export default function DrivePage() {
   const [sortBy, setSortBy] = useState('name');
   const [sortDir, setSortDir] = useState('asc');
   const [internalDragActive, setInternalDragActive] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const fileInputRef = useRef(null);
   const folderInputRef = useRef(null);
   const dragCounter = useRef(0);
@@ -57,6 +59,18 @@ export default function DrivePage() {
   useEffect(() => {
     setSelectedIds(new Set());
   }, [view, parentId, searchQuery]);
+
+  // Ctrl/Cmd+K opens the command palette from anywhere in the app.
+  useEffect(() => {
+    const handler = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setPaletteOpen(true);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -316,6 +330,26 @@ export default function DrivePage() {
 
   const isAdmin = user?.isAdmin;
 
+  const paletteCommands = [
+    { id: 'new-folder', label: 'New folder', run: () => setModal({ type: 'new-folder' }) },
+    { id: 'upload-files', label: 'Upload files', run: () => fileInputRef.current?.click() },
+    { id: 'upload-folder', label: 'Upload folder', run: () => folderInputRef.current?.click() },
+    { id: 'go-my-drive', label: 'Go to My Drive', run: goRoot },
+    { id: 'go-starred', label: 'Go to Starred', run: () => setView('starred') },
+    { id: 'go-recent', label: 'Go to Recent', run: () => setView('recent') },
+    { id: 'go-trash', label: 'Go to Trash', run: () => setView('trash') },
+    { id: 'settings', label: 'Open Settings', run: () => setModal({ type: 'settings' }) },
+    { id: 'storage', label: 'Storage details', run: () => setModal({ type: 'storage' }) },
+    ...(isAdmin
+      ? [
+          { id: 'users', label: 'Manage users', run: () => setModal({ type: 'users' }) },
+          { id: 'backups', label: 'Backups', run: () => setModal({ type: 'backups' }) },
+          { id: 'activity', label: 'Activity log', run: () => setModal({ type: 'activity' }) },
+        ]
+      : []),
+    { id: 'logout', label: 'Log out', hint: user?.username, run: logout },
+  ];
+
   return (
     <div
       className="app-shell"
@@ -481,7 +515,7 @@ export default function DrivePage() {
           )}
           <input
             className="search-input"
-            placeholder="Search your files…"
+            placeholder="Search your files… (Ctrl+K)"
             value={searchQuery}
             onChange={(e) => {
               const q = e.target.value;
@@ -688,6 +722,14 @@ export default function DrivePage() {
       {modal?.type === 'activity' && <ActivityModal onClose={closeModal} />}
       {modal?.type === 'settings' && <SettingsModal onClose={closeModal} />}
       {modal?.type === 'storage' && <StorageModal usage={usage} onClose={closeModal} />}
+
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        commands={paletteCommands}
+        onSearch={(q) => api.search(q).then((d) => d.items)}
+        onSelectFile={openItem}
+      />
     </div>
   );
 }
