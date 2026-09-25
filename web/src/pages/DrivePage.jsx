@@ -15,6 +15,7 @@ import SettingsModal from '../components/SettingsModal.jsx';
 import StorageModal from '../components/StorageModal.jsx';
 import CommandPalette from '../components/CommandPalette.jsx';
 import VersionHistoryModal from '../components/VersionHistoryModal.jsx';
+import CommentsModal from '../components/CommentsModal.jsx';
 import { ConfirmDialog } from '../components/Modal.jsx';
 import { formatBytes } from '../utils/format.js';
 import { filesToEntries, collectFilesFromDataTransfer } from '../utils/collectFiles.js';
@@ -288,6 +289,7 @@ export default function DrivePage() {
       versionInputRef.current?.click();
     },
     versionHistory: (node) => setModal({ type: 'version-history', node }),
+    comments: (node) => setModal({ type: 'comments', node }),
   };
 
   const toggleSelect = (id) => {
@@ -753,6 +755,10 @@ export default function DrivePage() {
 
       {modal?.type === 'version-history' && (
         <VersionHistoryModal node={modal.node} onChanged={refresh} onClose={closeModal} />
+      )}
+
+      {modal?.type === 'comments' && (
+        <CommentsModal node={modal.node} onChanged={refresh} onClose={closeModal} />
       )}
 
       <CommandPalette

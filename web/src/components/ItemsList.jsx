@@ -39,6 +39,9 @@ function RowMenu({ node, trashView, actions, onClose }) {
               </button>
             </>
           )}
+          <button onClick={() => actions.comments(node)}>
+            Comments{node.commentCount ? ` (${node.commentCount})` : ''}
+          </button>
           <button onClick={() => actions.rename(node)}>Rename</button>
           <button onClick={() => actions.move(node)}>Move</button>
           <button className="danger" onClick={() => actions.trash(node)}>

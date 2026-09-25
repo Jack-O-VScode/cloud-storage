@@ -59,6 +59,10 @@ export const api = {
 
   usage: () => request('/storage/usage'),
 
+  listComments: (id) => request(`/nodes/${id}/comments`),
+  addComment: (id, text) => request(`/nodes/${id}/comments`, { method: 'POST', body: { text } }),
+  deleteComment: (id, commentId) => request(`/nodes/${id}/comments/${commentId}`, { method: 'DELETE' }),
+
   listVersions: (id) => request(`/nodes/${id}/versions`),
   restoreVersion: (id, versionId) => request(`/nodes/${id}/versions/${versionId}/restore`, { method: 'POST' }),
   versionDownloadUrl: (id, versionId) => `${BASE}/nodes/${id}/versions/${versionId}/download?download=1`,

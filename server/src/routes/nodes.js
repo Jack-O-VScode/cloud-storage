@@ -60,7 +60,12 @@ function serialize(node) {
     shareUploadEnabled: node.type === 'folder' ? Boolean(node.shareUploadEnabled) : false,
     starred: Boolean(node.starred),
     versionCount: (node.versions || []).length,
+    commentCount: (node.comments || []).length,
   };
+}
+
+function serializeComment(c) {
+  return { id: c.id, userId: c.userId, username: c.username, text: c.text, createdAt: c.createdAt };
 }
 
 function serializeBundle(bundle) {
@@ -633,6 +638,46 @@ router.post('/:id/versions/:versionId/restore', requireFetchHeader, requireAuth,
   logActivity({ userId: req.user.id, username: req.user.username, action: 'restore_version', targetName: node.name });
   await save();
   res.json({ item: serialize(node) });
+});
+
+const MAX_COMMENT_LENGTH = 2000;
+
+router.get('/:id/comments', requireAuth, (req, res) => {
+  const node = loadOwnedNode(req, res);
+  if (!node) return;
+  res.json({ comments: (node.comments || []).map(serializeComment) });
+});
+
+router.post('/:id/comments', requireFetchHeader, requireAuth, (req, res) => {
+  const node = loadOwnedNode(req, res);
+  if (!node) return;
+  const text = String(req.body?.text || '').trim();
+  if (!text) return res.status(400).json({ error: 'Comment cannot be empty' });
+  if (text.length > MAX_COMMENT_LENGTH) {
+    return res.status(400).json({ error: `Comment is too long (max ${MAX_COMMENT_LENGTH} characters)` });
+  }
+  node.comments ||= [];
+  const comment = {
+    id: uuid(),
+    userId: req.user.id,
+    username: req.user.username,
+    text,
+    createdAt: Date.now(),
+  };
+  node.comments.push(comment);
+  save();
+  res.status(201).json({ comments: node.comments.map(serializeComment) });
+});
+
+router.delete('/:id/comments/:commentId', requireFetchHeader, requireAuth, (req, res) => {
+  const node = loadOwnedNode(req, res);
+  if (!node) return;
+  const comments = node.comments || [];
+  const comment = comments.find((c) => c.id === req.params.commentId);
+  if (!comment) return res.status(404).json({ error: 'Comment not found' });
+  node.comments = comments.filter((c) => c.id !== comment.id);
+  save();
+  res.json({ comments: node.comments.map(serializeComment) });
 });
 
 function streamFile(req, res, node) {

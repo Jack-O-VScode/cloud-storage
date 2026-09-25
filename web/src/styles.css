@@ -836,6 +836,41 @@ button {
   gap: 8px;
 }
 
+/* Comments modal */
+.comments-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.comment-row {
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.comment-row-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.comment-delete {
+  margin-left: auto;
+}
+.comment-text {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.comment-form {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+.comment-input {
+  flex: 1;
+  margin-bottom: 0;
+  resize: vertical;
+}
+
 /* Command palette */
 .palette-backdrop {
   position: fixed;
