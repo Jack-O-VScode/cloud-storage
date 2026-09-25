@@ -72,6 +72,8 @@ export const api = {
   backupDownloadUrl: (filename) => `${BASE}/backups/${encodeURIComponent(filename)}/download`,
 
   listActivity: () => request('/activity'),
+
+  updatePreferences: (prefs) => request('/auth/preferences', { method: 'PATCH', body: prefs }),
 };
 
 // Bulk zip download goes through fetch (not the JSON `request` helper)

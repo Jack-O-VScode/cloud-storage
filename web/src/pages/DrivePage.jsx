@@ -10,6 +10,7 @@ import PreviewModal from '../components/PreviewModal.jsx';
 import UsersAdminModal from '../components/UsersAdminModal.jsx';
 import BackupsModal from '../components/BackupsModal.jsx';
 import ActivityModal from '../components/ActivityModal.jsx';
+import SettingsModal from '../components/SettingsModal.jsx';
 import { ConfirmDialog } from '../components/Modal.jsx';
 import { formatBytes } from '../utils/format.js';
 import { filesToEntries, collectFilesFromDataTransfer } from '../utils/collectFiles.js';
@@ -367,19 +368,24 @@ export default function DrivePage() {
             </div>
           </div>
         )}
-        {isAdmin && (
-          <div className="admin-links">
-            <button className="link-btn" onClick={() => setModal({ type: 'users' })}>
-              Manage users
-            </button>
-            <button className="link-btn" onClick={() => setModal({ type: 'backups' })}>
-              Backups
-            </button>
-            <button className="link-btn" onClick={() => setModal({ type: 'activity' })}>
-              Activity
-            </button>
-          </div>
-        )}
+        <div className="admin-links">
+          <button className="link-btn" onClick={() => setModal({ type: 'settings' })}>
+            Settings
+          </button>
+          {isAdmin && (
+            <>
+              <button className="link-btn" onClick={() => setModal({ type: 'users' })}>
+                Manage users
+              </button>
+              <button className="link-btn" onClick={() => setModal({ type: 'backups' })}>
+                Backups
+              </button>
+              <button className="link-btn" onClick={() => setModal({ type: 'activity' })}>
+                Activity
+              </button>
+            </>
+          )}
+        </div>
         <div className="user-row">
           <span>{user?.username}</span>
           <button className="link-btn" onClick={logout}>
@@ -601,6 +607,7 @@ export default function DrivePage() {
       {modal?.type === 'users' && <UsersAdminModal onClose={closeModal} />}
       {modal?.type === 'backups' && <BackupsModal onClose={closeModal} />}
       {modal?.type === 'activity' && <ActivityModal onClose={closeModal} />}
+      {modal?.type === 'settings' && <SettingsModal onClose={closeModal} />}
     </div>
   );
 }

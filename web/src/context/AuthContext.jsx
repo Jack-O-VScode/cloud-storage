@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { api } from '../api.js';
+import { applyTheme } from '../utils/theme.js';
 
 const AuthContext = createContext(null);
 
@@ -33,6 +34,10 @@ export function AuthProvider({ children }) {
     bootstrap();
   }, [bootstrap]);
 
+  useEffect(() => {
+    if (user?.preferences) applyTheme(user.preferences);
+  }, [user?.preferences]);
+
   const login = async (username, password) => {
     const { user } = await api.login(username, password);
     setUser(user);
@@ -49,8 +54,16 @@ export function AuthProvider({ children }) {
     setUser(null);
   };
 
+  const updatePreferences = async (prefs) => {
+    const { user } = await api.updatePreferences(prefs);
+    setUser(user);
+    return user;
+  };
+
   return (
-    <AuthContext.Provider value={{ user, setupNeeded, status, login, logout, completeSetup }}>
+    <AuthContext.Provider
+      value={{ user, setupNeeded, status, login, logout, completeSetup, updatePreferences }}
+    >
       {children}
     </AuthContext.Provider>
   );

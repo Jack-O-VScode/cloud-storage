@@ -12,6 +12,7 @@ import {
   requireAuth,
   requireFetchHeader,
 } from '../auth.js';
+import { defaultPreferences, sanitizePreferences } from '../lib/preferences.js';
 
 const router = Router();
 
@@ -24,7 +25,13 @@ const loginLimiter = rateLimit({
 });
 
 function publicUser(u) {
-  return { id: u.id, username: u.username, isAdmin: u.isAdmin, createdAt: u.createdAt };
+  return {
+    id: u.id,
+    username: u.username,
+    isAdmin: u.isAdmin,
+    createdAt: u.createdAt,
+    preferences: { ...defaultPreferences(), ...(u.preferences || {}) },
+  };
 }
 
 router.get('/setup-needed', (req, res) => {
@@ -46,6 +53,7 @@ router.post('/setup', requireFetchHeader, (req, res) => {
     passwordHash: hashPassword(password),
     isAdmin: true,
     createdAt: Date.now(),
+    preferences: defaultPreferences(),
   };
   state.users.push(user);
   save();
@@ -74,6 +82,15 @@ router.post('/logout', requireFetchHeader, requireAuth, (req, res) => {
 
 router.get('/me', requireAuth, (req, res) => {
   res.json({ user: publicUser(req.user) });
+});
+
+router.patch('/preferences', requireFetchHeader, requireAuth, (req, res) => {
+  const state = getState();
+  const user = state.users.find((u) => u.id === req.user.id);
+  const sanitized = sanitizePreferences(req.body);
+  user.preferences = { ...defaultPreferences(), ...(user.preferences || {}), ...sanitized };
+  save();
+  res.json({ user: publicUser(user) });
 });
 
 export default router;

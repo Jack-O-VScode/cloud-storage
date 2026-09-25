@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 const uuid = crypto.randomUUID;
 import { getState, save, findUserByUsername, allOwnedBy, logActivity } from '../store.js';
 import { requireAuth, requireAdmin, requireFetchHeader, hashPassword } from '../auth.js';
+import { defaultPreferences } from '../lib/preferences.js';
 
 const router = Router();
 
@@ -52,6 +53,7 @@ router.post('/', requireFetchHeader, requireAuth, requireAdmin, (req, res) => {
     isAdmin: Boolean(isAdmin),
     createdAt: Date.now(),
     quotaBytes: parsedQuota,
+    preferences: defaultPreferences(),
   };
   state.users.push(user);
   logActivity({
