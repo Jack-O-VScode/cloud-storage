@@ -41,7 +41,10 @@ export const api = {
   updateUserQuota: (id, quotaBytes) => request(`/users/${id}`, { method: 'PATCH', body: { quotaBytes } }),
   deleteUser: (id) => request(`/users/${id}`, { method: 'DELETE' }),
 
-  listNodes: (parentId) => request(`/nodes?parentId=${encodeURIComponent(parentId)}`),
+  listNodes: (parentId, { sortBy = 'name', sortDir = 'asc', offset = 0, limit = 200 } = {}) =>
+    request(
+      `/nodes?parentId=${encodeURIComponent(parentId)}&sortBy=${sortBy}&sortDir=${sortDir}&offset=${offset}&limit=${limit}`
+    ),
   listTrash: () => request('/nodes/trash'),
   listStarred: () => request('/nodes/starred'),
   listRecent: () => request('/nodes/recent'),

@@ -933,6 +933,11 @@ button {
   font-weight: 500;
 }
 
+.load-more-btn {
+  margin: 16px auto;
+  display: block;
+}
+
 /* Command palette */
 .palette-backdrop {
   position: fixed;

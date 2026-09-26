@@ -22,6 +22,8 @@ import { ConfirmDialog } from '../components/Modal.jsx';
 import { formatBytes } from '../utils/format.js';
 import { filesToEntries, collectFilesFromDataTransfer } from '../utils/collectFiles.js';
 
+const PAGE_SIZE = 200;
+
 export default function DrivePage() {
   const { user, logout } = useAuth();
   const toast = useToast();
@@ -46,6 +48,8 @@ export default function DrivePage() {
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [sortBy, setSortBy] = useState('name');
   const [sortDir, setSortDir] = useState('asc');
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [internalDragActive, setInternalDragActive] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const fileInputRef = useRef(null);
@@ -109,20 +113,38 @@ export default function DrivePage() {
         setItems([]);
         setBreadcrumb([]);
       } else {
-        const data = await api.listNodes(parentId);
+        // Sorting happens server-side (so "Load more" keeps paging through
+        // one consistent order) - a fresh browse fetch always starts back
+        // at the top of the folder.
+        const data = await api.listNodes(parentId, { sortBy, sortDir, offset: 0, limit: PAGE_SIZE });
         setItems(data.items);
         setBreadcrumb(data.breadcrumb);
+        setHasMore(data.hasMore);
       }
     } catch (err) {
       toast.push(err.message, 'error');
     } finally {
       setLoading(false);
     }
-  }, [view, parentId, searchQuery]);
+  }, [view, parentId, searchQuery, sortBy, sortDir]);
 
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  const loadMore = async () => {
+    if (view !== 'browse' || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const data = await api.listNodes(parentId, { sortBy, sortDir, offset: items.length, limit: PAGE_SIZE });
+      setItems((prev) => [...prev, ...data.items]);
+      setHasMore(data.hasMore);
+    } catch (err) {
+      toast.push(err.message, 'error');
+    } finally {
+      setLoadingMore(false);
+    }
+  };
 
   const refreshUsage = useCallback(() => {
     api.usage().then(setUsage).catch(() => {});
@@ -211,16 +233,21 @@ export default function DrivePage() {
     }
   };
 
-  // Folders are always grouped before files, matching the server's default
-  // order; within each group, sort by whatever the user picked.
-  const sortedItems = [...items].sort((a, b) => {
-    if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
-    let cmp;
-    if (sortBy === 'size') cmp = (a.size || 0) - (b.size || 0);
-    else if (sortBy === 'updatedAt') cmp = (a.updatedAt || 0) - (b.updatedAt || 0);
-    else cmp = a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
-    return sortDir === 'asc' ? cmp : -cmp;
-  });
+  // The browse view arrives pre-sorted (and paginated) by the server, so
+  // re-sorting it client-side would only reorder whatever page happened to
+  // be loaded so far. Every other view fetches its whole result set in one
+  // go, so sorting it here is still correct.
+  const sortedItems =
+    view === 'browse'
+      ? items
+      : [...items].sort((a, b) => {
+          if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
+          let cmp;
+          if (sortBy === 'size') cmp = (a.size || 0) - (b.size || 0);
+          else if (sortBy === 'updatedAt') cmp = (a.updatedAt || 0) - (b.updatedAt || 0);
+          else cmp = a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+          return sortDir === 'asc' ? cmp : -cmp;
+        });
 
   const onMoveItem = async (draggedId, targetFolderId) => {
     const dragged = items.find((i) => i.id === draggedId);
@@ -691,6 +718,12 @@ export default function DrivePage() {
             onMoveItem={view === 'browse' && !sharedMode ? onMoveItem : undefined}
             viewerRole={viewerRole}
           />
+        )}
+
+        {view === 'browse' && hasMore && !loading && (
+          <button className="btn load-more-btn" onClick={loadMore} disabled={loadingMore}>
+            {loadingMore ? 'Loading…' : 'Load more'}
+          </button>
         )}
       </main>
 

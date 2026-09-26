@@ -121,21 +121,44 @@ function assertParentIsUsableFolder(req, res, parentId, requiredLevel = 'view') 
   return false;
 }
 
+const SORT_FIELDS = new Set(['name', 'size', 'updatedAt']);
+const DEFAULT_PAGE_SIZE = 200;
+const MAX_PAGE_SIZE = 500;
+
+// Folders always sort before files; within each group, by whatever field
+// the caller asked for.
+function compareNodes(a, b, sortBy, sortDir) {
+  if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
+  let cmp;
+  if (sortBy === 'size') cmp = (a.size || 0) - (b.size || 0);
+  else if (sortBy === 'updatedAt') cmp = (a.updatedAt || 0) - (b.updatedAt || 0);
+  else cmp = a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+  return sortDir === 'desc' ? -cmp : cmp;
+}
+
 router.get('/', requireAuth, (req, res) => {
   const parentId = fromClientParentId(req.query.parentId);
   if (!assertParentIsUsableFolder(req, res, parentId, 'view')) return;
   const parent = parentId ? findNodeById(parentId) : null;
+
+  const sortBy = SORT_FIELDS.has(req.query.sortBy) ? req.query.sortBy : 'name';
+  const sortDir = req.query.sortDir === 'desc' ? 'desc' : 'asc';
+  const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+  const limit = Math.min(MAX_PAGE_SIZE, Math.max(1, parseInt(req.query.limit, 10) || DEFAULT_PAGE_SIZE));
+
   // A null parentId always means "my own drive root" - a grant can only
   // ever target a specific folder, never someone else's whole root.
-  const items = (parent ? getState().nodes.filter((n) => n.parentId === parent.id && !n.trashed) : childrenOf(req.user.id, parentId)).sort(
-    (a, b) => {
-      if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
-      return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
-    }
-  );
+  const allItems = (
+    parent ? getState().nodes.filter((n) => n.parentId === parent.id && !n.trashed) : childrenOf(req.user.id, parentId)
+  ).sort((a, b) => compareNodes(a, b, sortBy, sortDir));
+
+  const page = allItems.slice(offset, offset + limit);
+
   res.json({
-    items: items.map(serialize),
+    items: page.map(serialize),
     breadcrumb: parent ? breadcrumbFor(parent, req.user.id).map(serialize) : [],
+    total: allItems.length,
+    hasMore: offset + page.length < allItems.length,
   });
 });
 
