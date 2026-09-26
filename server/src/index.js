@@ -14,6 +14,7 @@ import backupRoutes from './routes/backups.js';
 import activityRoutes from './routes/activity.js';
 import grantRoutes from './routes/grants.js';
 import uploadSessionRoutes from './routes/uploadSessions.js';
+import webdavRoutes from './routes/webdav.js';
 import { scheduleTrashSweep } from './lib/trashSweep.js';
 import { scheduleMetadataBackups } from './lib/backup.js';
 import { scheduleUploadSessionSweep } from './lib/uploadSessions.js';
@@ -44,6 +45,11 @@ app.use('/api/backups', backupRoutes);
 app.use('/api/activity', activityRoutes);
 app.use('/api/grants', grantRoutes);
 app.use('/api/upload-sessions', uploadSessionRoutes);
+// Mounted outside /api and ahead of the SPA catch-all below: WebDAV clients
+// (Explorer, Finder, rclone, ...) expect a plain path, and authenticate
+// with HTTP Basic Auth on every request rather than the session cookie the
+// rest of the app uses.
+app.use('/webdav', webdavRoutes);
 
 scheduleTrashSweep();
 scheduleMetadataBackups();
@@ -53,7 +59,7 @@ app.get('/api/health', (req, res) => res.json({ ok: true }));
 
 const publicDir = path.join(__dirname, '..', 'public');
 app.use(express.static(publicDir, { index: false }));
-app.get(/^(?!\/api\/).*/, (req, res) => {
+app.get(/^(?!\/api\/|\/webdav\/).*/, (req, res) => {
   res.sendFile(path.join(publicDir, 'index.html'));
 });
 
