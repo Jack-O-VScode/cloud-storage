@@ -131,35 +131,91 @@ export async function downloadZip(ids) {
   URL.revokeObjectURL(url);
 }
 
-// XHR (not fetch) so we get upload progress events.
+const CHUNK_SIZE = 8 * 1024 * 1024;
+const MAX_CHUNK_RETRIES = 5;
+
+async function postJson(path, body) {
+  const res = await fetch(BASE + path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'cloud-storage' },
+    credentials: 'same-origin',
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new ApiError(data.error || `Upload failed (${res.status})`, res.status);
+  return data;
+}
+
+// Uploads one file in chunks, retrying a dropped chunk (with backoff)
+// instead of the whole file having to restart - the server tells us via
+// `receivedBytes` where it actually got to, so a lost response doesn't
+// desync the client from what was really written.
+async function uploadOneFileChunked(file, parentId, relativePath, onBytesLoaded) {
+  const { sessionId } = await postJson('/upload-sessions', {
+    name: file.name,
+    size: file.size,
+    mimeType: file.type,
+    parentId,
+    relativePath: relativePath || '',
+  });
+
+  let offset = 0;
+  while (offset < file.size) {
+    const chunk = file.slice(offset, Math.min(offset + CHUNK_SIZE, file.size));
+    let attempt = 0;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      try {
+        const res = await fetch(`${BASE}/upload-sessions/${sessionId}/chunk`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/octet-stream',
+            'X-Requested-With': 'cloud-storage',
+            'X-Chunk-Offset': String(offset),
+          },
+          credentials: 'same-origin',
+          body: chunk,
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          if (res.status === 409 && typeof data.receivedBytes === 'number') {
+            offset = data.receivedBytes; // resync to where the server really is, then retry from there
+            break;
+          }
+          throw new ApiError(data.error || `Upload failed (${res.status})`, res.status);
+        }
+        offset = data.receivedBytes;
+        onBytesLoaded(offset);
+        break;
+      } catch (err) {
+        if (err instanceof ApiError) throw err; // a real rejection, not a dropped connection - don't retry
+        attempt += 1;
+        if (attempt > MAX_CHUNK_RETRIES) {
+          throw new ApiError("Upload failed after several retries - check your connection", 0);
+        }
+        await new Promise((r) => setTimeout(r, Math.min(1000 * 2 ** attempt, 15000)));
+      }
+    }
+  }
+
+  const { item } = await postJson(`/upload-sessions/${sessionId}/complete`, {});
+  return item;
+}
+
 // `relativePaths`, when given, must be the same length/order as `files` -
 // used to recreate a folder's structure server-side instead of flattening it.
-export function uploadFiles(files, parentId, onProgress, relativePaths) {
-  return new Promise((resolve, reject) => {
-    const form = new FormData();
-    form.append('parentId', parentId);
-    for (const file of files) form.append('files', file, file.name);
-    if (relativePaths) form.append('relativePaths', JSON.stringify(relativePaths));
-
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', BASE + '/nodes/upload');
-    xhr.setRequestHeader('X-Requested-With', 'cloud-storage');
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
-    };
-    xhr.onload = () => {
-      let data = {};
-      try {
-        data = JSON.parse(xhr.responseText);
-      } catch {
-        // ignore
-      }
-      if (xhr.status >= 200 && xhr.status < 300) resolve(data);
-      else reject(new ApiError(data.error || `Upload failed (${xhr.status})`, xhr.status));
-    };
-    xhr.onerror = () => reject(new ApiError('Network error during upload', 0));
-    xhr.send(form);
-  });
+export async function uploadFiles(files, parentId, onProgress, relativePaths) {
+  const totalBytes = files.reduce((sum, f) => sum + f.size, 0) || 1;
+  const perFileLoaded = new Array(files.length).fill(0);
+  const items = [];
+  for (let i = 0; i < files.length; i++) {
+    const item = await uploadOneFileChunked(files[i], parentId, relativePaths?.[i], (loaded) => {
+      perFileLoaded[i] = loaded;
+      onProgress?.(perFileLoaded.reduce((a, b) => a + b, 0) / totalBytes);
+    });
+    items.push(item);
+  }
+  return { items };
 }
 
 // Uploads a single file as a new version of an existing file node, keeping

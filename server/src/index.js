@@ -13,8 +13,10 @@ import storageRoutes from './routes/storage.js';
 import backupRoutes from './routes/backups.js';
 import activityRoutes from './routes/activity.js';
 import grantRoutes from './routes/grants.js';
+import uploadSessionRoutes from './routes/uploadSessions.js';
 import { scheduleTrashSweep } from './lib/trashSweep.js';
 import { scheduleMetadataBackups } from './lib/backup.js';
+import { scheduleUploadSessionSweep } from './lib/uploadSessions.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -41,9 +43,11 @@ app.use('/api/storage', storageRoutes);
 app.use('/api/backups', backupRoutes);
 app.use('/api/activity', activityRoutes);
 app.use('/api/grants', grantRoutes);
+app.use('/api/upload-sessions', uploadSessionRoutes);
 
 scheduleTrashSweep();
 scheduleMetadataBackups();
+scheduleUploadSessionSweep();
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 

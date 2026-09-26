@@ -841,5 +841,13 @@ router.get('/:id/thumbnail', requireAuth, (req, res) => {
   streamFile(req, res, target);
 });
 
-export { streamFile, maybeGenerateThumbnail };
+export {
+  streamFile,
+  maybeGenerateThumbnail,
+  assertParentIsUsableFolder,
+  resolveFolderChain,
+  sanitizeName,
+  serialize,
+  fromClientParentId,
+};
 export default router;
