@@ -131,7 +131,11 @@ export async function downloadZip(ids) {
   URL.revokeObjectURL(url);
 }
 
-const CHUNK_SIZE = 8 * 1024 * 1024;
+// Bigger chunks mean fewer round trips for a large file - each chunk
+// carries fixed per-request overhead (HTTP framing, a disk write on the
+// server), so at 8MB an 8GB file needed ~1000 round trips just for
+// bookkeeping, on top of whatever the actual transfer took.
+const CHUNK_SIZE = 32 * 1024 * 1024;
 const MAX_CHUNK_RETRIES = 5;
 
 async function postJson(path, body) {

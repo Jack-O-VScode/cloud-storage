@@ -71,7 +71,9 @@ router.post('/', requireFetchHeader, requireAuth, async (req, res) => {
 // client sending Content-Type: application/octet-stream (the app-wide
 // express.json() middleware ignores non-JSON content types, so the two
 // coexist without conflict).
-const rawBody = express.raw({ type: '*/*', limit: '20mb' });
+// Kept a bit above the client's own chunk size (see CHUNK_SIZE in
+// web/src/api.js) so a legitimate chunk is never rejected as oversized.
+const rawBody = express.raw({ type: '*/*', limit: '40mb' });
 
 router.put('/:id/chunk', requireFetchHeader, requireAuth, rawBody, async (req, res) => {
   const session = getSession(req.params.id);
