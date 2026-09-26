@@ -11,6 +11,7 @@ import { isWithin, breadcrumb } from '../lib/tree.js';
 import { streamZip } from '../lib/zip.js';
 import { blobPath } from '../lib/paths.js';
 import { extractText } from '../lib/textExtract.js';
+import { compressImageInPlace } from '../lib/imageCompress.js';
 import { streamFile, maybeGenerateThumbnail } from './nodes.js';
 
 const router = Router();
@@ -312,19 +313,25 @@ router.post('/:token/upload', requireFetchHeader, shareUpload.array('files'), as
     }
   }
 
+  const compressImages = Boolean(owner?.preferences?.compressImages);
   const state = getState();
   const now = Date.now();
   const created = [];
   for (const file of req.files || []) {
     const name = sanitizeName(file.originalname);
     const mimeType = file.mimetype || mime.lookup(file.originalname) || 'application/octet-stream';
+    let fileSize = file.size;
+    if (compressImages) {
+      const compressedSize = await compressImageInPlace(blobPath(file.filename), { mimeType, size: fileSize });
+      if (compressedSize) fileSize = compressedSize;
+    }
     const created_ = {
       id: crypto.randomUUID(),
       name,
       type: 'file',
       parentId: folder.id,
       ownerId: node.ownerId,
-      size: file.size,
+      size: fileSize,
       mimeType,
       blobName: file.filename,
       trashed: false,
@@ -332,7 +339,7 @@ router.post('/:token/upload', requireFetchHeader, shareUpload.array('files'), as
       createdAt: now,
       updatedAt: now,
     };
-    const contentText = await extractText(blobPath(file.filename), { mimeType, name, size: file.size });
+    const contentText = await extractText(blobPath(file.filename), { mimeType, name, size: fileSize });
     if (contentText) created_.contentText = contentText;
     const thumbnailBlobName = await maybeGenerateThumbnail(mimeType, blobPath(file.filename));
     if (thumbnailBlobName) created_.thumbnailBlobName = thumbnailBlobName;

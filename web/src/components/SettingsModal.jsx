@@ -173,6 +173,22 @@ export default function SettingsModal({ onClose }) {
         </div>
       </div>
 
+      <hr className="divider" />
+
+      <h4>Uploads</h4>
+      <label className="checkbox-row">
+        <input
+          type="checkbox"
+          checked={prefs.compressImages}
+          onChange={(e) => save({ compressImages: e.target.checked })}
+        />
+        Compress large photos to save space
+      </label>
+      <p className="muted small">
+        Re-encodes and downsizes large images (over 2MB) on upload. Saves storage, but is lossy - the original
+        quality isn't kept.
+      </p>
+
       {error && <p className="form-error">{error}</p>}
     </Modal>
   );

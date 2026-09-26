@@ -24,6 +24,7 @@ import { streamZip } from '../lib/zip.js';
 import { purgeNodeBlob } from '../lib/purge.js';
 import { extractText } from '../lib/textExtract.js';
 import { generateThumbnail } from '../lib/thumbnail.js';
+import { compressImageInPlace } from '../lib/imageCompress.js';
 import { hasAccess, breadcrumbFor } from '../lib/access.js';
 
 const router = Router();
@@ -323,8 +324,10 @@ router.post('/upload', requireFetchHeader, requireAuth, upload.array('files'), a
   // share links - not the collaborator doing the uploading.
   const parent = parentId ? findNodeById(parentId) : null;
   const ownerId = parent ? parent.ownerId : req.user.id;
+  const owner = findUserById(ownerId);
+  const compressImages = Boolean(owner?.preferences?.compressImages);
 
-  const quotaBytes = findUserById(ownerId)?.quotaBytes;
+  const quotaBytes = owner?.quotaBytes;
   if (quotaBytes) {
     const incomingBytes = (req.files || []).reduce((sum, f) => sum + f.size, 0);
     const currentlyUsed = allOwnedBy(ownerId)
@@ -369,13 +372,18 @@ router.post('/upload', requireFetchHeader, requireAuth, upload.array('files'), a
     }
     const name = sanitizeName(file.originalname);
     const mimeType = file.mimetype || mime.lookup(file.originalname) || 'application/octet-stream';
+    let fileSize = file.size;
+    if (compressImages) {
+      const compressedSize = await compressImageInPlace(blobPath(file.filename), { mimeType, size: fileSize });
+      if (compressedSize) fileSize = compressedSize;
+    }
     const node = {
       id: uuid(),
       name,
       type: 'file',
       parentId: targetParentId,
       ownerId,
-      size: file.size,
+      size: fileSize,
       mimeType,
       blobName: file.filename,
       trashed: false,
@@ -383,7 +391,7 @@ router.post('/upload', requireFetchHeader, requireAuth, upload.array('files'), a
       createdAt: now,
       updatedAt: now,
     };
-    const contentText = await extractText(blobPath(file.filename), { mimeType, name, size: file.size });
+    const contentText = await extractText(blobPath(file.filename), { mimeType, name, size: fileSize });
     if (contentText) node.contentText = contentText;
     const thumbnailBlobName = await maybeGenerateThumbnail(mimeType, blobPath(file.filename));
     if (thumbnailBlobName) node.thumbnailBlobName = thumbnailBlobName;
@@ -655,12 +663,17 @@ router.post('/:id/version', requireFetchHeader, requireAuth, upload.single('file
   }
 
   const mimeType = req.file.mimetype || mime.lookup(req.file.originalname) || 'application/octet-stream';
+  let fileSize = req.file.size;
+  if (findUserById(node.ownerId)?.preferences?.compressImages) {
+    const compressedSize = await compressImageInPlace(blobPath(req.file.filename), { mimeType, size: fileSize });
+    if (compressedSize) fileSize = compressedSize;
+  }
   const oldThumbnailBlobName = node.thumbnailBlobName;
   node.blobName = req.file.filename;
-  node.size = req.file.size;
+  node.size = fileSize;
   node.mimeType = mimeType;
   node.updatedAt = Date.now();
-  const contentText = await extractText(blobPath(req.file.filename), { mimeType, name: node.name, size: req.file.size });
+  const contentText = await extractText(blobPath(req.file.filename), { mimeType, name: node.name, size: fileSize });
   if (contentText) node.contentText = contentText;
   else delete node.contentText;
   const thumbnailBlobName = await maybeGenerateThumbnail(mimeType, blobPath(req.file.filename));

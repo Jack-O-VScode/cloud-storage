@@ -25,6 +25,7 @@ export const DEFAULT_PREFERENCES = {
   buttonStyle: 'solid', // 'solid' | 'glass'
   fontFamily: 'system',
   textSize: 'normal', // 'small' | 'normal' | 'large'
+  compressImages: false, // re-encode/downsize large photos on upload to save space
 };
 
 const HEX_RE = /^#[0-9a-fA-F]{6}$/;
@@ -57,6 +58,9 @@ export function sanitizePreferences(input) {
   }
   if (input.textSize === 'small' || input.textSize === 'normal' || input.textSize === 'large') {
     out.textSize = input.textSize;
+  }
+  if (typeof input.compressImages === 'boolean') {
+    out.compressImages = input.compressImages;
   }
   return out;
 }
