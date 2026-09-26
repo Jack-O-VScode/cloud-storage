@@ -11,7 +11,7 @@ import { isWithin, breadcrumb } from '../lib/tree.js';
 import { streamZip } from '../lib/zip.js';
 import { blobPath } from '../lib/paths.js';
 import { extractText } from '../lib/textExtract.js';
-import { streamFile } from './nodes.js';
+import { streamFile, maybeGenerateThumbnail } from './nodes.js';
 
 const router = Router();
 
@@ -334,6 +334,8 @@ router.post('/:token/upload', requireFetchHeader, shareUpload.array('files'), as
     };
     const contentText = await extractText(blobPath(file.filename), { mimeType, name, size: file.size });
     if (contentText) created_.contentText = contentText;
+    const thumbnailBlobName = await maybeGenerateThumbnail(mimeType, blobPath(file.filename));
+    if (thumbnailBlobName) created_.thumbnailBlobName = thumbnailBlobName;
     state.nodes.push(created_);
     created.push(created_);
   }

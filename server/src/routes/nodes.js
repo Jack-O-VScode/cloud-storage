@@ -23,6 +23,7 @@ import { isSelfOrDescendantMove, descendantsOf } from '../lib/tree.js';
 import { streamZip } from '../lib/zip.js';
 import { purgeNodeBlob } from '../lib/purge.js';
 import { extractText } from '../lib/textExtract.js';
+import { generateThumbnail } from '../lib/thumbnail.js';
 import { hasAccess, breadcrumbFor } from '../lib/access.js';
 
 const router = Router();
@@ -40,6 +41,17 @@ function fromClientParentId(parentId) {
 function sanitizeName(raw) {
   const cleaned = String(raw || '').replace(/[/\\\u0000-\u001f]/g, ' ').trim();
   return cleaned || 'Untitled';
+}
+
+// Generates and writes a thumbnail blob for an image file, returning its
+// blob name (or null for a non-image / an image sharp couldn't decode).
+async function maybeGenerateThumbnail(mimeType, sourcePath) {
+  if (!mimeType.startsWith('image/')) return null;
+  const thumbBuf = await generateThumbnail(sourcePath);
+  if (!thumbBuf) return null;
+  const thumbName = uuid();
+  await fsp.writeFile(blobPath(thumbName), thumbBuf);
+  return thumbName;
 }
 
 function serialize(node) {
@@ -373,6 +385,8 @@ router.post('/upload', requireFetchHeader, requireAuth, upload.array('files'), a
     };
     const contentText = await extractText(blobPath(file.filename), { mimeType, name, size: file.size });
     if (contentText) node.contentText = contentText;
+    const thumbnailBlobName = await maybeGenerateThumbnail(mimeType, blobPath(file.filename));
+    if (thumbnailBlobName) node.thumbnailBlobName = thumbnailBlobName;
     state.nodes.push(node);
     created.push(node);
   }
@@ -641,6 +655,7 @@ router.post('/:id/version', requireFetchHeader, requireAuth, upload.single('file
   }
 
   const mimeType = req.file.mimetype || mime.lookup(req.file.originalname) || 'application/octet-stream';
+  const oldThumbnailBlobName = node.thumbnailBlobName;
   node.blobName = req.file.filename;
   node.size = req.file.size;
   node.mimeType = mimeType;
@@ -648,6 +663,10 @@ router.post('/:id/version', requireFetchHeader, requireAuth, upload.single('file
   const contentText = await extractText(blobPath(req.file.filename), { mimeType, name: node.name, size: req.file.size });
   if (contentText) node.contentText = contentText;
   else delete node.contentText;
+  const thumbnailBlobName = await maybeGenerateThumbnail(mimeType, blobPath(req.file.filename));
+  if (thumbnailBlobName) node.thumbnailBlobName = thumbnailBlobName;
+  else delete node.thumbnailBlobName;
+  if (oldThumbnailBlobName) await fsp.unlink(blobPath(oldThumbnailBlobName)).catch(() => {});
 
   logActivity({ userId: req.user.id, username: req.user.username, action: 'new_version', targetName: node.name });
   await save();
@@ -691,6 +710,7 @@ router.post('/:id/versions/:versionId/restore', requireFetchHeader, requireAuth,
   };
   node.versions = versions;
 
+  const oldThumbnailBlobName = node.thumbnailBlobName;
   node.blobName = version.blobName;
   node.size = version.size;
   node.mimeType = version.mimeType;
@@ -702,6 +722,10 @@ router.post('/:id/versions/:versionId/restore', requireFetchHeader, requireAuth,
   });
   if (contentText) node.contentText = contentText;
   else delete node.contentText;
+  const thumbnailBlobName = await maybeGenerateThumbnail(version.mimeType, blobPath(version.blobName));
+  if (thumbnailBlobName) node.thumbnailBlobName = thumbnailBlobName;
+  else delete node.thumbnailBlobName;
+  if (oldThumbnailBlobName) await fsp.unlink(blobPath(oldThumbnailBlobName)).catch(() => {});
 
   logActivity({ userId: req.user.id, username: req.user.username, action: 'restore_version', targetName: node.name });
   await save();
@@ -789,5 +813,20 @@ router.get('/:id/download', requireAuth, (req, res) => {
   streamFile(req, res, node);
 });
 
-export { streamFile };
+// Falls back to the original file for anything without a pre-generated
+// thumbnail (a non-image, or one uploaded before this feature/that sharp
+// couldn't decode) - the client always just requests this URL for a
+// listing's row icon, no separate "does this have a thumbnail" check.
+router.get('/:id/thumbnail', requireAuth, (req, res) => {
+  const node = loadAccessibleNode(req, res, 'view');
+  if (!node) return;
+  if (node.type !== 'file') return res.status(400).json({ error: 'Not a file' });
+  const target = node.thumbnailBlobName
+    ? { ...node, blobName: node.thumbnailBlobName, mimeType: 'image/jpeg' }
+    : node;
+  res.setHeader('Cache-Control', 'private, max-age=86400');
+  streamFile(req, res, target);
+});
+
+export { streamFile, maybeGenerateThumbnail };
 export default router;

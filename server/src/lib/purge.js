@@ -6,6 +6,8 @@ import { blobPath } from './paths.js';
 // whose blob is already gone.
 export async function purgeNodeBlob(node) {
   if (node.type !== 'file') return;
-  const blobNames = [node.blobName, ...(node.versions || []).map((v) => v.blobName)].filter(Boolean);
+  const blobNames = [node.blobName, node.thumbnailBlobName, ...(node.versions || []).map((v) => v.blobName)].filter(
+    Boolean
+  );
   await Promise.all(blobNames.map((name) => fsp.unlink(blobPath(name)).catch(() => {})));
 }

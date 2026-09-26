@@ -77,7 +77,7 @@ function RowMenu({ node, trashView, actions, viewerRole, onClose }) {
 function RowIcon({ item }) {
   const category = mimeCategory(item);
   if (category === 'image') {
-    return <img className="items-thumb" src={api.previewUrl(item.id)} loading="lazy" alt="" />;
+    return <img className="items-thumb" src={api.thumbnailUrl(item.id)} loading="lazy" alt="" />;
   }
   return <Icon category={category} />;
 }
