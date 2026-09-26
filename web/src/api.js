@@ -101,9 +101,27 @@ export const api = {
   updatePreferences: (prefs) => request('/auth/preferences', { method: 'PATCH', body: prefs }),
 };
 
+// Tracks recent (loadedBytes, time) samples in a trailing window so a
+// speed reading is a smoothed rate rather than jumping around with every
+// chunk/read event - a single 32MB chunk landing all at once would
+// otherwise read as an absurd instantaneous spike.
+function createSpeedTracker(windowMs = 3000) {
+  const samples = [];
+  return (loadedBytes) => {
+    const now = performance.now();
+    samples.push({ t: now, bytes: loadedBytes });
+    while (samples.length > 1 && now - samples[0].t > windowMs) samples.shift();
+    const dt = (now - samples[0].t) / 1000;
+    return dt > 0 ? (loadedBytes - samples[0].bytes) / dt : 0;
+  };
+}
+
 // Bulk zip download goes through fetch (not the JSON `request` helper)
 // since the response body is binary, then gets saved via a synthetic link.
-export async function downloadZip(ids) {
+// The zip is streamed/generated on the fly server-side with no known
+// final size, so `onProgress` only ever gets bytes-so-far and a speed
+// reading - never a total or a percentage.
+export async function downloadZip(ids, onProgress) {
   const res = await fetch(BASE + '/nodes/zip', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'cloud-storage' },
@@ -119,10 +137,31 @@ export async function downloadZip(ids) {
     }
     throw new ApiError(data.error || `Download failed (${res.status})`, res.status);
   }
-  const blob = await res.blob();
+
   const disposition = res.headers.get('content-disposition') || '';
   const match = /filename\*=UTF-8''([^;]+)/.exec(disposition);
   const filename = match ? decodeURIComponent(match[1]) : 'download.zip';
+
+  const chunks = [];
+  const reader = res.body?.getReader();
+  if (reader) {
+    const speedTracker = createSpeedTracker();
+    let loadedBytes = 0;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      loadedBytes += value.length;
+      onProgress?.({ loadedBytes, bytesPerSecond: speedTracker(loadedBytes) });
+    }
+  } else {
+    // A browser without a streamable response body - fall back to
+    // buffering it whole, with no progress reporting along the way.
+    chunks.push(new Uint8Array(await res.arrayBuffer()));
+  }
+
+  const blob = new Blob(chunks, { type: 'application/zip' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -154,6 +193,35 @@ async function postJson(path, body) {
 // instead of the whole file having to restart - the server tells us via
 // `receivedBytes` where it actually got to, so a lost response doesn't
 // desync the client from what was really written.
+// XHR (not fetch) specifically so `xhr.upload.onprogress` gives real
+// byte-level progress DURING a single chunk's transfer - fetch only
+// resolves once the whole request/response is done, which at a 32MB chunk
+// size meant most files (anything under 32MB) showed no progress at all
+// until they suddenly jumped to 100%.
+function putChunk(sessionId, chunk, offset, onChunkBytes) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', `${BASE}/upload-sessions/${sessionId}/chunk`);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.setRequestHeader('X-Requested-With', 'cloud-storage');
+    xhr.setRequestHeader('X-Chunk-Offset', String(offset));
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onChunkBytes(e.loaded);
+    };
+    xhr.onload = () => {
+      let data = {};
+      try {
+        data = JSON.parse(xhr.responseText);
+      } catch {
+        // ignore
+      }
+      resolve({ ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, data });
+    };
+    xhr.onerror = () => reject(new Error('network-error'));
+    xhr.send(chunk);
+  });
+}
+
 async function uploadOneFileChunked(file, parentId, relativePath, onBytesLoaded) {
   const { sessionId } = await postJson('/upload-sessions', {
     name: file.name,
@@ -170,25 +238,15 @@ async function uploadOneFileChunked(file, parentId, relativePath, onBytesLoaded)
     // eslint-disable-next-line no-constant-condition
     while (true) {
       try {
-        const res = await fetch(`${BASE}/upload-sessions/${sessionId}/chunk`, {
-          method: 'PUT',
-          headers: {
-            'Content-Type': 'application/octet-stream',
-            'X-Requested-With': 'cloud-storage',
-            'X-Chunk-Offset': String(offset),
-          },
-          credentials: 'same-origin',
-          body: chunk,
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          if (res.status === 409 && typeof data.receivedBytes === 'number') {
-            offset = data.receivedBytes; // resync to where the server really is, then retry from there
+        const result = await putChunk(sessionId, chunk, offset, (chunkBytes) => onBytesLoaded(offset + chunkBytes));
+        if (!result.ok) {
+          if (result.status === 409 && typeof result.data.receivedBytes === 'number') {
+            offset = result.data.receivedBytes; // resync to where the server really is, then retry from there
             break;
           }
-          throw new ApiError(data.error || `Upload failed (${res.status})`, res.status);
+          throw new ApiError(result.data.error || `Upload failed (${result.status})`, result.status);
         }
-        offset = data.receivedBytes;
+        offset = result.data.receivedBytes;
         onBytesLoaded(offset);
         break;
       } catch (err) {
@@ -208,14 +266,31 @@ async function uploadOneFileChunked(file, parentId, relativePath, onBytesLoaded)
 
 // `relativePaths`, when given, must be the same length/order as `files` -
 // used to recreate a folder's structure server-side instead of flattening it.
+// `onProgress`, when given, is called with { fraction, loadedBytes,
+// totalBytes, bytesPerSecond } - a plain fraction wouldn't be enough to
+// also show a speed/ETA alongside the progress bar.
 export async function uploadFiles(files, parentId, onProgress, relativePaths) {
   const totalBytes = files.reduce((sum, f) => sum + f.size, 0) || 1;
   const perFileLoaded = new Array(files.length).fill(0);
+  const speedTracker = createSpeedTracker();
+  let lastReportedAt = 0;
   const items = [];
   for (let i = 0; i < files.length; i++) {
     const item = await uploadOneFileChunked(files[i], parentId, relativePaths?.[i], (loaded) => {
       perFileLoaded[i] = loaded;
-      onProgress?.(perFileLoaded.reduce((a, b) => a + b, 0) / totalBytes);
+      const loadedBytes = perFileLoaded.reduce((a, b) => a + b, 0);
+      // Byte-level progress can fire dozens of times a second on a fast
+      // connection - throttle how often it actually reaches React state,
+      // but never drop the final (100%) update.
+      const now = performance.now();
+      if (loadedBytes < totalBytes && now - lastReportedAt < 150) return;
+      lastReportedAt = now;
+      onProgress?.({
+        fraction: loadedBytes / totalBytes,
+        loadedBytes,
+        totalBytes,
+        bytesPerSecond: speedTracker(loadedBytes),
+      });
     });
     items.push(item);
   }

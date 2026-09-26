@@ -19,7 +19,7 @@ import VersionHistoryModal from '../components/VersionHistoryModal.jsx';
 import CommentsModal from '../components/CommentsModal.jsx';
 import AccessModal from '../components/AccessModal.jsx';
 import { ConfirmDialog } from '../components/Modal.jsx';
-import { formatBytes } from '../utils/format.js';
+import { formatBytes, formatSpeed, formatDuration } from '../utils/format.js';
 import { filesToEntries, collectFilesFromDataTransfer } from '../utils/collectFiles.js';
 
 const PAGE_SIZE = 200;
@@ -43,6 +43,8 @@ export default function DrivePage() {
   const [usage, setUsage] = useState(null);
   const [dragActive, setDragActive] = useState(false);
   const [uploadPct, setUploadPct] = useState(null);
+  const [uploadStats, setUploadStats] = useState(null); // { loadedBytes, totalBytes, bytesPerSecond }
+  const [downloadStats, setDownloadStats] = useState(null); // { loadedBytes, bytesPerSecond } | null
 
   const [modal, setModal] = useState(null); // { type, node? }
   const [selectedIds, setSelectedIds] = useState(new Set());
@@ -191,7 +193,15 @@ export default function DrivePage() {
       const files = entries.map((e) => e.file);
       const relativePaths = entries.map((e) => e.relativePath || '');
       const hasPaths = relativePaths.some(Boolean);
-      await uploadFiles(files, parentId, (p) => setUploadPct(p), hasPaths ? relativePaths : undefined);
+      await uploadFiles(
+        files,
+        parentId,
+        (info) => {
+          setUploadPct(info.fraction);
+          setUploadStats(info);
+        },
+        hasPaths ? relativePaths : undefined
+      );
       toast.push(`Uploaded ${files.length} item${files.length > 1 ? 's' : ''}`, 'success');
       refresh();
       refreshUsage();
@@ -199,6 +209,7 @@ export default function DrivePage() {
       toast.push(err.message, 'error');
     } finally {
       setUploadPct(null);
+      setUploadStats(null);
     }
   };
 
@@ -277,10 +288,13 @@ export default function DrivePage() {
   const actions = {
     download: async (node) => {
       if (node.type === 'folder') {
+        setDownloadStats({ loadedBytes: 0, bytesPerSecond: 0 });
         try {
-          await downloadZip([node.id]);
+          await downloadZip([node.id], setDownloadStats);
         } catch (err) {
           toast.push(err.message, 'error');
+        } finally {
+          setDownloadStats(null);
         }
       } else {
         const a = document.createElement('a');
@@ -364,10 +378,13 @@ export default function DrivePage() {
   const selectedNodes = items.filter((i) => selectedIds.has(i.id));
 
   const bulkDownload = async () => {
+    setDownloadStats({ loadedBytes: 0, bytesPerSecond: 0 });
     try {
-      await downloadZip([...selectedIds]);
+      await downloadZip([...selectedIds], setDownloadStats);
     } catch (err) {
       toast.push(err.message, 'error');
+    } finally {
+      setDownloadStats(null);
     }
   };
   const bulkTrash = async () => {
@@ -641,7 +658,26 @@ export default function DrivePage() {
 
         {uploadPct !== null && (
           <div className="upload-progress">
+            <div className="upload-progress-label">
+              <span>Uploading… {Math.round(uploadPct * 100)}%</span>
+              <span>
+                {uploadStats?.bytesPerSecond > 0 && formatSpeed(uploadStats.bytesPerSecond)}
+                {uploadStats?.bytesPerSecond > 0 &&
+                  uploadStats.totalBytes > uploadStats.loadedBytes &&
+                  ` · ${formatDuration((uploadStats.totalBytes - uploadStats.loadedBytes) / uploadStats.bytesPerSecond)} left`}
+              </span>
+            </div>
             <div className="upload-progress-fill" style={{ width: `${uploadPct * 100}%` }} />
+          </div>
+        )}
+
+        {downloadStats && (
+          <div className="upload-progress">
+            <div className="upload-progress-label">
+              <span>Preparing download… {formatBytes(downloadStats.loadedBytes)}</span>
+              <span>{downloadStats.bytesPerSecond > 0 && formatSpeed(downloadStats.bytesPerSecond)}</span>
+            </div>
+            <div className="upload-progress-fill upload-progress-indeterminate" />
           </div>
         )}
 

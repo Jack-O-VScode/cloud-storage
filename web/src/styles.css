@@ -374,13 +374,47 @@ button {
 }
 
 .upload-progress {
-  height: 3px;
-  background: var(--border);
+  padding: 6px 24px 0;
+}
+.upload-progress-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.78125rem;
+  color: var(--text-muted);
+  margin-bottom: 4px;
 }
 .upload-progress-fill {
-  height: 100%;
+  height: 3px;
   background: var(--user-accent-bg, var(--primary));
   transition: width 0.15s ease;
+  border-radius: 2px;
+}
+
+/* Indeterminate variant for a download whose total size isn't known
+   upfront (a zip is streamed/generated on the fly) - a sliding segment
+   instead of a value-driven fill. */
+.upload-progress-indeterminate {
+  width: 40% !important;
+  background: var(--border);
+  position: relative;
+  overflow: hidden;
+}
+.upload-progress-indeterminate::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: 50%;
+  background: var(--user-accent-bg, var(--primary));
+  animation: upload-progress-slide 1.2s ease-in-out infinite;
+}
+@keyframes upload-progress-slide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(200%);
+  }
 }
 
 .selection-bar {
