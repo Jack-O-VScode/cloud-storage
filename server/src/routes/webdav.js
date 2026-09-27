@@ -15,7 +15,7 @@ import {
   logActivity,
 } from '../store.js';
 import { verifyPassword } from '../auth.js';
-import { blobPath } from '../lib/paths.js';
+import { blobPath, diskUsage } from '../lib/paths.js';
 import { isSelfOrDescendantMove, descendantsOf } from '../lib/tree.js';
 import { extractText } from '../lib/textExtract.js';
 import { parsePathSegments, resolveNode, resolveParentId } from '../lib/webdavPath.js';
@@ -86,7 +86,21 @@ router.options('*', (req, res) => {
   res.status(200).end();
 });
 
-router.propfind('*', (req, res) => {
+// RFC 4331 quota properties for the drive root - without these, clients
+// like Windows Explorer show a made-up placeholder size instead of your
+// real usage/free space.
+async function rootQuota(user) {
+  const used = allOwnedBy(user.id)
+    .filter((n) => n.type === 'file' && !n.trashed)
+    .reduce((sum, n) => sum + (n.size || 0), 0);
+  if (user.quotaBytes) {
+    return { used, available: Math.max(0, user.quotaBytes - used) };
+  }
+  const disk = await diskUsage();
+  return { used, available: disk.free ?? 0 };
+}
+
+router.propfind('*', async (req, res) => {
   const segments = segmentsFromReq(req);
   const ownerId = req.user.id;
   const node = segments.length ? resolveNode(ownerId, segments) : { type: 'folder', name: '', updatedAt: Date.now() };
@@ -99,7 +113,8 @@ router.propfind('*', (req, res) => {
       .send(multistatus([nodePropResponse(node, hrefFor(segments, false))]));
   }
 
-  const entries = [nodePropResponse(node, hrefFor(segments, true))];
+  const quota = segments.length ? null : await rootQuota(req.user);
+  const entries = [nodePropResponse(node, hrefFor(segments, true), quota)];
   const depth = req.headers.depth;
   if (depth !== '0') {
     const parentId = segments.length ? node.id : null;

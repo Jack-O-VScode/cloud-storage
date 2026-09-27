@@ -10,7 +10,12 @@ export function xmlEscape(str) {
 // returns this fixed set - matches how many minimal WebDAV servers behave,
 // and covers what every mainstream client (Explorer, Finder, rclone,
 // Cyberduck) actually reads.
-export function nodePropResponse(node, href) {
+// `quota`, when given (only meaningful on the drive root), is
+// { used, available } in bytes - the standard way (RFC 4331) for a WebDAV
+// server to tell a client its real usage/free space. Without it, clients
+// like Windows Explorer just invent a generic placeholder number instead
+// of leaving the drive's Properties dialog blank.
+export function nodePropResponse(node, href, quota) {
   const isCollection = node.type === 'folder';
   const lastModified = new Date(node.updatedAt || node.createdAt || Date.now()).toUTCString();
   const extra = isCollection
@@ -18,6 +23,9 @@ export function nodePropResponse(node, href) {
     : `<D:getcontentlength>${node.size || 0}</D:getcontentlength><D:getcontenttype>${xmlEscape(
         node.mimeType || 'application/octet-stream'
       )}</D:getcontenttype>`;
+  const quotaProps = quota
+    ? `<D:quota-used-bytes>${quota.used}</D:quota-used-bytes><D:quota-available-bytes>${quota.available}</D:quota-available-bytes>`
+    : '';
   return `<D:response>
 <D:href>${xmlEscape(href)}</D:href>
 <D:propstat>
@@ -26,6 +34,7 @@ export function nodePropResponse(node, href) {
 <D:displayname>${xmlEscape(node.name)}</D:displayname>
 <D:getlastmodified>${lastModified}</D:getlastmodified>
 ${extra}
+${quotaProps}
 </D:prop>
 <D:status>HTTP/1.1 200 OK</D:status>
 </D:propstat>
