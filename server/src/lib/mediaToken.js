@@ -1,7 +1,10 @@
 import jwt from 'jsonwebtoken';
 import { config } from '../config.js';
 
-const MEDIA_TOKEN_TTL = '15m';
+// Long enough to cover a large video: iOS's save flow fetches it in range
+// requests over the whole transfer, each re-checking the token, and the
+// user may have the preview open a while before tapping save.
+const MEDIA_TOKEN_TTL = '6h';
 
 // A short-lived, single-file-scoped token that lets a browser-initiated
 // save/download flow fetch a file without the session cookie. This matters
