@@ -79,6 +79,7 @@ export const api = {
   downloadUrl: (id) => `${BASE}/nodes/${id}/download?download=1`,
   previewUrl: (id) => `${BASE}/nodes/${id}/download`,
   thumbnailUrl: (id) => `${BASE}/nodes/${id}/thumbnail`,
+  getMediaToken: (id) => request(`/nodes/${id}/media-token`),
 
   // Public share endpoints (no auth cookie needed - the token is the credential).
   shareMeta: (token) => request(`/share/${token}`),

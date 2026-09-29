@@ -26,6 +26,7 @@ import { extractText } from '../lib/textExtract.js';
 import { generateThumbnail } from '../lib/thumbnail.js';
 import { compressImageInPlace } from '../lib/imageCompress.js';
 import { hasAccess, breadcrumbFor } from '../lib/access.js';
+import { signMediaToken, verifyMediaToken } from '../lib/mediaToken.js';
 
 const router = Router();
 
@@ -819,7 +820,32 @@ function streamFile(req, res, node) {
   });
 }
 
-router.get('/:id/download', requireAuth, (req, res) => {
+// Mints a short-lived token scoped to this one file, so a preview element
+// (video/image/audio/pdf) can be given a URL that works without the
+// session cookie - see lib/mediaToken.js for why that matters.
+router.get('/:id/media-token', requireAuth, (req, res) => {
+  const node = loadAccessibleNode(req, res, 'view');
+  if (!node) return;
+  res.json({ token: signMediaToken(node.id, req.user.id) });
+});
+
+// Accepts either the normal session cookie or a `?token=` media token
+// (see lib/mediaToken.js) - falls back to cookie auth if the token is
+// missing or invalid, so this is a strict superset of requireAuth.
+function requireAuthOrMediaToken(req, res, next) {
+  const token = req.query.token;
+  if (typeof token === 'string') {
+    const userId = verifyMediaToken(token, req.params.id);
+    const user = userId && findUserById(userId);
+    if (user) {
+      req.user = user;
+      return next();
+    }
+  }
+  return requireAuth(req, res, next);
+}
+
+router.get('/:id/download', requireAuthOrMediaToken, (req, res) => {
   const node = loadAccessibleNode(req, res, 'view');
   if (!node) return;
   if (node.type !== 'file') return res.status(400).json({ error: 'Not a file' });
@@ -830,7 +856,7 @@ router.get('/:id/download', requireAuth, (req, res) => {
 // thumbnail (a non-image, or one uploaded before this feature/that sharp
 // couldn't decode) - the client always just requests this URL for a
 // listing's row icon, no separate "does this have a thumbnail" check.
-router.get('/:id/thumbnail', requireAuth, (req, res) => {
+router.get('/:id/thumbnail', requireAuthOrMediaToken, (req, res) => {
   const node = loadAccessibleNode(req, res, 'view');
   if (!node) return;
   if (node.type !== 'file') return res.status(400).json({ error: 'Not a file' });
