@@ -87,6 +87,7 @@ export default function UsersAdminModal({ onClose }) {
   const [error, setError] = useState('');
   const [form, setForm] = useState({ username: '', password: '', isAdmin: false, quotaGb: '' });
   const [creating, setCreating] = useState(false);
+  const [notice, setNotice] = useState('');
 
   const load = () => api.listUsers().then((d) => setUsers(d.users));
 
@@ -117,9 +118,22 @@ export default function UsersAdminModal({ onClose }) {
   };
 
   const removeUser = async (id) => {
-    if (!confirm('Delete this user? Their files stay on disk but they lose access.')) return;
-    await api.deleteUser(id);
-    load();
+    const target = users.find((u) => u.id === id);
+    const name = target?.username || 'this user';
+    if (
+      !confirm(
+        `Delete ${name}'s account?\n\nTheir files will be moved into a "From ${name}" folder in your drive, and every link or folder they shared stops working.`
+      )
+    )
+      return;
+    setError('');
+    try {
+      const result = await api.deleteUser(id);
+      setNotice(result.transferredTo ? `${name} removed - their files are in “${result.transferredTo}” in My Drive.` : `${name} removed.`);
+      load();
+    } catch (err) {
+      setError(err.message);
+    }
   };
 
   const onQuotaSaved = (updatedUser) => {
@@ -129,6 +143,7 @@ export default function UsersAdminModal({ onClose }) {
   return (
     <Modal title="Manage users" onClose={onClose} width={480} footer={<button className="btn" onClick={onClose}>Close</button>}>
       {loading && <p className="muted">Loading…</p>}
+      {notice && <p className="small share-ok">{notice}</p>}
       <div className="users-list">
         {users.map((u) => (
           <UserRow key={u.id} u={u} isSelf={u.id === me.id} onRemove={removeUser} onQuotaSaved={onQuotaSaved} />

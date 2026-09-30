@@ -44,17 +44,27 @@ export function isWithin(nodeId, rootId) {
   return false;
 }
 
-export function descendantsOf(nodeId) {
-  const state = getState();
+// parentId -> [children] over every node, built in one pass - so walking a
+// subtree costs O(total nodes) once instead of a full scan per folder.
+export function buildChildrenIndex() {
+  const index = new Map();
+  for (const n of getState().nodes) {
+    if (!n.parentId) continue;
+    let list = index.get(n.parentId);
+    if (!list) index.set(n.parentId, (list = []));
+    list.push(n);
+  }
+  return index;
+}
+
+export function descendantsOf(nodeId, childrenIndex = buildChildrenIndex()) {
   const result = [];
   const stack = [nodeId];
   while (stack.length) {
     const id = stack.pop();
-    for (const n of state.nodes) {
-      if (n.parentId === id) {
-        result.push(n);
-        stack.push(n.id);
-      }
+    for (const n of childrenIndex.get(id) || []) {
+      result.push(n);
+      stack.push(n.id);
     }
   }
   return result;

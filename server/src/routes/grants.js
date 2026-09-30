@@ -9,11 +9,12 @@ import {
   findUserById,
   findGrantById,
   findGrant,
-  grantsForFolder,
+  grantsForNode,
   grantsForUser,
   logActivity,
 } from '../store.js';
 import { LEVELS } from '../lib/access.js';
+import { serialize } from './nodes.js';
 
 const router = Router();
 
@@ -21,7 +22,7 @@ function serializeGrant(g) {
   const grantee = findUserById(g.granteeUserId);
   return {
     id: g.id,
-    folderId: g.folderId,
+    nodeId: g.nodeId,
     granteeUserId: g.granteeUserId,
     granteeUsername: grantee?.username || '(deleted user)',
     permission: g.permission,
@@ -29,43 +30,53 @@ function serializeGrant(g) {
   };
 }
 
-// Only the folder's owner can view/manage who it's shared with - sharing
+// Only the item's owner can view/manage who it's shared with - sharing
 // controls stay owner-only even for a collaborator with edit access.
-function loadOwnedFolder(req, res, folderId) {
-  const folder = findNodeById(folderId);
-  if (!folder || folder.ownerId !== req.user.id || folder.type !== 'folder' || folder.trashed) {
+function loadOwnedNode(req, res, nodeId) {
+  const node = findNodeById(nodeId);
+  if (!node || node.ownerId !== req.user.id || node.trashed) {
     res.status(404).json({ error: 'Not found' });
     return null;
   }
-  return folder;
+  return node;
 }
 
-router.get('/for-folder/:folderId', requireAuth, (req, res) => {
-  const folder = loadOwnedFolder(req, res, req.params.folderId);
-  if (!folder) return;
-  res.json({ grants: grantsForFolder(folder.id).map(serializeGrant) });
+function grantsResponse(node) {
+  return { grants: grantsForNode(node.id).map(serializeGrant) };
+}
+
+router.get('/for-node/:nodeId', requireAuth, (req, res) => {
+  const node = loadOwnedNode(req, res, req.params.nodeId);
+  if (!node) return;
+  res.json(grantsResponse(node));
 });
 
+// Adds someone, or changes the level of someone already added.
 router.post('/', requireFetchHeader, requireAuth, (req, res) => {
-  const { folderId, granteeUsername, permission } = req.body || {};
-  const folder = loadOwnedFolder(req, res, folderId);
-  if (!folder) return;
+  const { nodeId, granteeUsername, permission } = req.body || {};
+  const node = loadOwnedNode(req, res, nodeId);
+  if (!node) return;
   if (!Object.prototype.hasOwnProperty.call(LEVELS, permission)) {
     return res.status(400).json({ error: 'Invalid permission level' });
   }
+  // "Can upload" means adding new files into a folder - there's nothing
+  // to upload into on a single file.
+  if (permission === 'upload' && node.type !== 'folder') {
+    return res.status(400).json({ error: 'Upload access only applies to folders' });
+  }
   const username = String(granteeUsername || '').trim();
   const grantee = username ? findUserByUsername(username) : null;
-  if (!grantee) return res.status(404).json({ error: 'No account with that username' });
-  if (grantee.id === req.user.id) return res.status(400).json({ error: "You already own this folder" });
+  if (!grantee) return res.status(404).json({ error: `No account called "${username}"` });
+  if (grantee.id === req.user.id) return res.status(400).json({ error: "That's you - you already own this" });
 
   const state = getState();
-  const existing = findGrant(folder.id, grantee.id);
+  const existing = findGrant(node.id, grantee.id);
   if (existing) {
     existing.permission = permission;
   } else {
     state.grants.push({
       id: crypto.randomUUID(),
-      folderId: folder.id,
+      nodeId: node.id,
       ownerId: req.user.id,
       granteeUserId: grantee.id,
       permission,
@@ -76,44 +87,52 @@ router.post('/', requireFetchHeader, requireAuth, (req, res) => {
     userId: req.user.id,
     username: req.user.username,
     action: 'grant_access',
-    targetName: folder.name,
+    targetName: node.name,
     details: `${permission} access to ${grantee.username}`,
   });
   save();
-  res.status(201).json({ grants: grantsForFolder(folder.id).map(serializeGrant) });
+  res.status(201).json(grantsResponse(node));
 });
 
+// The owner can take anyone's access away; a person can also remove
+// something shared with them from their own "Shared with me".
 router.delete('/:id', requireFetchHeader, requireAuth, (req, res) => {
   const grant = findGrantById(req.params.id);
-  if (!grant) return res.status(404).json({ error: 'Not found' });
-  const folder = loadOwnedFolder(req, res, grant.folderId);
-  if (!folder) return;
+  const node = grant && findNodeById(grant.nodeId);
+  const isOwner = node && node.ownerId === req.user.id;
+  const isGrantee = grant && grant.granteeUserId === req.user.id;
+  if (!grant || (!isOwner && !isGrantee)) return res.status(404).json({ error: 'Not found' });
   const state = getState();
   state.grants = state.grants.filter((g) => g.id !== grant.id);
-  logActivity({ userId: req.user.id, username: req.user.username, action: 'revoke_access', targetName: folder.name });
+  logActivity({
+    userId: req.user.id,
+    username: req.user.username,
+    action: isOwner ? 'revoke_access' : 'leave_share',
+    targetName: node?.name || '(deleted item)',
+  });
   save();
-  res.json({ grants: grantsForFolder(folder.id).map(serializeGrant) });
+  res.json(node && isOwner ? grantsResponse(node) : { ok: true });
 });
 
-// Folders directly shared with the current user (not ones they merely have
+// Items directly shared with the current user (not ones they merely have
 // inherited access to via a deeper grant) - the entry points for their
 // "Shared with me" view.
 router.get('/shared-with-me', requireAuth, (req, res) => {
   const items = grantsForUser(req.user.id)
     .map((g) => {
-      const folder = findNodeById(g.folderId);
-      if (!folder || folder.trashed) return null;
-      const owner = findUserById(folder.ownerId);
+      const node = findNodeById(g.nodeId);
+      if (!node || node.trashed) return null;
       return {
-        id: folder.id,
-        name: folder.name,
+        ...serialize(node, req.user.id),
+        grantId: g.id,
         permission: g.permission,
-        ownerUsername: owner?.username || '(unknown)',
+        sharedAt: g.createdAt,
       };
     })
     .filter(Boolean)
-    .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+    .sort((a, b) => (b.sharedAt || 0) - (a.sharedAt || 0));
   res.json({ items });
 });
 
+export { serializeGrant };
 export default router;

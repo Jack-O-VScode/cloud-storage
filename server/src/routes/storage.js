@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { requireAuth } from '../auth.js';
 import { allOwnedBy, findUserById } from '../store.js';
 import { diskUsage } from '../lib/paths.js';
+import { config } from '../config.js';
 
 const router = Router();
 
@@ -38,7 +39,7 @@ router.get('/usage', requireAuth, async (req, res) => {
 
   const disk = await diskUsage();
   const quotaBytes = findUserById(req.user.id)?.quotaBytes || null;
-  res.json({ bytesUsed, bytesTrashed, byCategory, disk, quotaBytes });
+  res.json({ bytesUsed, bytesTrashed, byCategory, disk, quotaBytes, trashAutoEmptyDays: config.trashAutoEmptyDays });
 });
 
 export default router;

@@ -11,6 +11,13 @@ export function verifyPassword(password, hash) {
   return bcrypt.compareSync(password, hash);
 }
 
+// Non-blocking variant for hot paths - a bcrypt check deliberately takes a
+// few hundred ms of CPU, and the sync version stalls every other request
+// (uploads included) on the server for that whole time.
+export function verifyPasswordAsync(password, hash) {
+  return bcrypt.compare(password, hash);
+}
+
 export function issueToken(user) {
   return jwt.sign({ sub: user.id }, config.jwtSecret, { expiresIn: '30d' });
 }

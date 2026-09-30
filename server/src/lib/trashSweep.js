@@ -1,25 +1,24 @@
 import { config } from '../config.js';
 import { getState, save, logActivity } from '../store.js';
-import { purgeNodeBlob } from './purge.js';
+import { isTopLevelTrashed, removeNodesPermanently } from './trash.js';
 
 export async function sweepTrash() {
   if (!config.trashAutoEmptyDays) return;
   const cutoff = Date.now() - config.trashAutoEmptyDays * 24 * 60 * 60 * 1000;
   const state = getState();
-  const toRemove = state.nodes.filter((n) => n.trashed && n.trashedAt && n.trashedAt < cutoff);
-  if (!toRemove.length) return;
-
-  await Promise.all(toRemove.map((n) => purgeNodeBlob(n)));
-  const removeIds = new Set(toRemove.map((n) => n.id));
-  state.nodes = state.nodes.filter((n) => !removeIds.has(n.id));
+  // Whole trashed items (a folder takes its contents with it), so nothing
+  // is ever left behind pointing at a parent that no longer exists.
+  const roots = state.nodes.filter((n) => isTopLevelTrashed(n) && n.trashedAt && n.trashedAt < cutoff);
+  if (!roots.length) return;
+  const removedCount = await removeNodesPermanently(roots);
   logActivity({
     action: 'auto_empty_trash',
-    targetName: `${toRemove.length} item(s)`,
+    targetName: `${removedCount} item(s)`,
     details: `older than ${config.trashAutoEmptyDays} days`,
   });
   await save();
   console.log(
-    `[trash-sweep] permanently deleted ${toRemove.length} item(s) older than ${config.trashAutoEmptyDays} days`
+    `[trash-sweep] permanently deleted ${removedCount} item(s) older than ${config.trashAutoEmptyDays} days`
   );
 }
 

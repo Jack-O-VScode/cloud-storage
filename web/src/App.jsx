@@ -5,15 +5,22 @@ import SetupPage from './pages/SetupPage.jsx';
 import LoginPage from './pages/LoginPage.jsx';
 import DrivePage from './pages/DrivePage.jsx';
 import SharePage from './pages/SharePage.jsx';
+import UploadPanel from './components/UploadPanel.jsx';
 
 export default function App() {
   const shareMatch = /^\/s\/([^/]+)/.exec(window.location.pathname);
   if (shareMatch) {
-    return <SharePage token={shareMatch[1]} />;
+    return (
+      <>
+        <SharePage token={shareMatch[1]} />
+        <UploadPanel />
+      </>
+    );
   }
   return (
     <ToastProvider>
       <Gate />
+      <UploadPanel />
     </ToastProvider>
   );
 }

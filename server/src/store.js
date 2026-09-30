@@ -36,6 +36,14 @@ export function loadStore() {
   state.activity ||= [];
   state.bundles ||= [];
   state.grants ||= [];
+  // Grants used to be folder-only and stored their target as `folderId`;
+  // they can now target any node (file or folder), stored as `nodeId`.
+  for (const g of state.grants) {
+    if (g.folderId && !g.nodeId) {
+      g.nodeId = g.folderId;
+      delete g.folderId;
+    }
+  }
   return state;
 }
 
@@ -74,8 +82,23 @@ export function findUserById(id) {
   return state.users.find((u) => u.id === id);
 }
 
+// id -> node lookup, rebuilt lazily whenever state.nodes is reassigned
+// (every removal in this codebase filters into a new array) or grows (a
+// push). A linear scan per lookup got expensive in the loops that walk
+// parent chains (breadcrumbs, access checks) once a drive holds tens of
+// thousands of files.
+let nodeIndex = new Map();
+let indexedArray = null;
+let indexedLength = -1;
+
 export function findNodeById(id) {
-  return state.nodes.find((n) => n.id === id);
+  if (!id) return undefined;
+  if (indexedArray !== state.nodes || indexedLength !== state.nodes.length) {
+    nodeIndex = new Map(state.nodes.map((n) => [n.id, n]));
+    indexedArray = state.nodes;
+    indexedLength = state.nodes.length;
+  }
+  return nodeIndex.get(id);
 }
 
 export function childrenOf(ownerId, parentId, { includeTrashed = false } = {}) {
@@ -100,12 +123,12 @@ export function findGrantById(id) {
   return state.grants.find((g) => g.id === id);
 }
 
-export function findGrant(folderId, granteeUserId) {
-  return state.grants.find((g) => g.folderId === folderId && g.granteeUserId === granteeUserId);
+export function findGrant(nodeId, granteeUserId) {
+  return state.grants.find((g) => g.nodeId === nodeId && g.granteeUserId === granteeUserId);
 }
 
-export function grantsForFolder(folderId) {
-  return state.grants.filter((g) => g.folderId === folderId);
+export function grantsForNode(nodeId) {
+  return state.grants.filter((g) => g.nodeId === nodeId);
 }
 
 export function grantsForUser(userId) {
@@ -118,8 +141,29 @@ const MAX_ACTIVITY_ENTRIES = 1000;
 // already persist state after their own mutation, so this just piggybacks
 // on that write; routes with nothing else to persist (e.g. login) must
 // call save() themselves.
+const COALESCE_WINDOW_MS = 2 * 60 * 1000;
+const COALESCED_ACTIONS = new Set(['upload', 'share_upload']);
+
 export function logActivity({ userId, username, action, targetName, details }) {
   state.activity ||= [];
+  // A batch of uploads finishes one file at a time (each its own request),
+  // which would otherwise bury everything else in the log under hundreds
+  // of near-identical lines - fold them into one "N files" entry instead.
+  if (COALESCED_ACTIONS.has(action)) {
+    const last = state.activity[state.activity.length - 1];
+    if (
+      last &&
+      last.action === action &&
+      last.userId === (userId || null) &&
+      last.details === (details || null) &&
+      Date.now() - last.timestamp < COALESCE_WINDOW_MS
+    ) {
+      last.count = (last.count || 1) + 1;
+      last.targetName = `${last.count} files`;
+      last.timestamp = Date.now();
+      return;
+    }
+  }
   state.activity.push({
     id: crypto.randomUUID(),
     timestamp: Date.now(),

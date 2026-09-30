@@ -1,20 +1,35 @@
 import { Router } from 'express';
-import fsp from 'node:fs/promises';
-import crypto from 'node:crypto';
-import multer from 'multer';
-import mime from 'mime-types';
 import jwt from 'jsonwebtoken';
+import rateLimit from 'express-rate-limit';
 import { config } from '../config.js';
-import { getState, save, findNodeById, findUserById, allOwnedBy, logActivity, findBundleByToken } from '../store.js';
+import { getState, findNodeById, findUserById, findBundleByToken } from '../store.js';
 import { verifyPassword, requireFetchHeader } from '../auth.js';
 import { isWithin, breadcrumb } from '../lib/tree.js';
 import { streamZip } from '../lib/zip.js';
-import { blobPath } from '../lib/paths.js';
-import { extractText } from '../lib/textExtract.js';
-import { compressImageInPlace } from '../lib/imageCompress.js';
-import { streamFile, maybeGenerateThumbnail } from './nodes.js';
+import { getSession } from '../lib/uploadSessions.js';
+import { streamFile } from './nodes.js';
+import {
+  startSession,
+  writeChunk,
+  completeSession,
+  cancelSession,
+  assertQuota,
+  rawChunkBody,
+  sendError,
+} from './uploadSessions.js';
 
 const router = Router();
+
+// A link password is the only thing between the internet and whatever it
+// protects - cap guesses per IP so it can't simply be brute-forced.
+const unlockLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+  message: { error: 'Too many wrong passwords - try again in 15 minutes' },
+});
 
 function findByShareToken(token) {
   return getState().nodes.find((n) => n.shareToken === token && !n.trashed);
@@ -66,6 +81,8 @@ function publicSerialize(node) {
     type: node.type,
     size: node.size || 0,
     mimeType: node.mimeType || null,
+    updatedAt: node.updatedAt || null,
+    hasThumbnail: Boolean(node.thumbnailBlobName),
   };
 }
 
@@ -153,7 +170,7 @@ router.get('/:token', (req, res) => {
   });
 });
 
-router.post('/:token/unlock', requireFetchHeader, (req, res) => {
+router.post('/:token/unlock', requireFetchHeader, unlockLimiter, (req, res) => {
   const target = loadShareTarget(req, res);
   if (!target) return;
   const shareable = target.kind === 'node' ? target.node : target.bundle;
@@ -240,6 +257,26 @@ router.get('/:token/download', (req, res) => {
   streamFile(req, res, file);
 });
 
+router.get('/:token/thumbnail', (req, res) => {
+  const target = loadShareTarget(req, res);
+  if (!target) return;
+  const shareable = target.kind === 'node' ? target.node : target.bundle;
+  if (!isUnlocked(req, shareable)) return res.status(401).json({ error: 'Password required' });
+  let file;
+  if (target.kind === 'node') {
+    file = resolveTargetNode(req, res, target.node);
+    if (!file) return;
+  } else {
+    const resolved = resolveBundleTarget(req, res, target.bundle);
+    if (!resolved) return;
+    if (resolved.root) return res.status(400).json({ error: 'Not a file' });
+    file = resolved.node;
+  }
+  if (file.type !== 'file' || !file.thumbnailBlobName) return res.status(404).json({ error: 'No thumbnail' });
+  res.setHeader('Cache-Control', 'private, max-age=86400');
+  streamFile(req, res, { ...file, blobName: file.thumbnailBlobName, mimeType: 'image/jpeg' });
+});
+
 router.get('/:token/zip', async (req, res) => {
   const target = loadShareTarget(req, res);
   if (!target) return;
@@ -261,103 +298,92 @@ router.get('/:token/zip', async (req, res) => {
   await streamZip(res, [resolved.node], `${resolved.node.name}.zip`);
 });
 
-// Strips path separators/control characters so a file name can never be
-// mistaken for a path segment - matters once names feed into zip entries.
-function sanitizeName(raw) {
-  const cleaned = String(raw || '').replace(/[/\\\u0000-\u001f]/g, ' ').trim();
-  return cleaned || 'Untitled';
-}
-
-const shareUpload = multer({
-  storage: multer.diskStorage({
-    destination: (req, file, cb) => cb(null, config.blobDir),
-    filename: (req, file, cb) => cb(null, crypto.randomUUID()),
-  }),
-  limits: { fileSize: config.maxUploadBytes },
-});
-
-// Lets visitors upload into a folder the owner explicitly opted in to
-// receiving uploads (node.shareUploadEnabled) - a bundle share never
+// Visitor uploads into a folder the owner explicitly opted in to
+// receiving uploads (node.shareUploadEnabled) - a multi-item link never
 // supports this, since it has no single folder to receive files into.
-router.post('/:token/upload', requireFetchHeader, shareUpload.array('files'), async (req, res) => {
-  const cleanup = () => Promise.all((req.files || []).map((f) => fsp.unlink(f.path).catch(() => {})));
-
+// Same resumable, chunked protocol as signed-in uploads, with the link
+// itself as the credential; a clashing name is always kept alongside
+// ("name (1).ext") - a visitor can never overwrite the owner's files.
+function loadUploadableShare(req, res) {
   const node = findByShareToken(req.params.token);
   if (!node || isExpired(node) || node.type !== 'folder' || !node.shareUploadEnabled) {
-    await cleanup();
-    return res.status(404).json({ error: 'Link not found, revoked, expired, or uploads disabled' });
+    res.status(404).json({ error: 'Link not found, revoked, expired, or uploads disabled' });
+    return null;
   }
   if (!isUnlocked(req, node)) {
-    await cleanup();
-    return res.status(401).json({ error: 'Password required' });
+    res.status(401).json({ error: 'Password required' });
+    return null;
   }
+  return node;
+}
+
+function loadShareSession(req, res) {
+  const node = loadUploadableShare(req, res);
+  if (!node) return null;
+  const session = getSession(req.params.sessionId);
+  if (!session || session.uploader.shareToken !== node.shareToken) {
+    res.status(404).json({ error: 'Upload session not found or expired' });
+    return null;
+  }
+  return { node, session };
+}
+
+router.post('/:token/upload-sessions', requireFetchHeader, async (req, res) => {
+  const node = loadUploadableShare(req, res);
+  if (!node) return;
+  const body = req.body || {};
+  req.query.nodeId = body.nodeId || undefined;
   const folder = resolveTargetNode(req, res, node);
-  if (!folder) {
-    await cleanup();
-    return;
-  }
-  if (folder.type !== 'folder') {
-    await cleanup();
-    return res.status(400).json({ error: 'Not a folder' });
-  }
-
-  const owner = findUserById(node.ownerId);
-  if (owner?.quotaBytes) {
-    const incomingBytes = (req.files || []).reduce((sum, f) => sum + f.size, 0);
-    const currentlyUsed = allOwnedBy(node.ownerId)
-      .filter((n) => n.type === 'file' && !n.trashed)
-      .reduce((sum, n) => sum + (n.size || 0), 0);
-    if (currentlyUsed + incomingBytes > owner.quotaBytes) {
-      await cleanup();
-      return res.status(413).json({ error: "This upload would exceed the folder owner's storage quota." });
+  if (!folder) return;
+  if (folder.type !== 'folder') return res.status(400).json({ error: 'Not a folder' });
+  try {
+    const size = Number(body.size);
+    if (!Number.isInteger(size) || size < 0 || size > config.maxUploadBytes) {
+      return res.status(400).json({ error: 'Invalid or missing file size' });
     }
-  }
-
-  const compressImages = Boolean(owner?.preferences?.compressImages);
-  const state = getState();
-  const now = Date.now();
-  const created = [];
-  for (const file of req.files || []) {
-    const name = sanitizeName(file.originalname);
-    const mimeType = file.mimetype || mime.lookup(file.originalname) || 'application/octet-stream';
-    let fileSize = file.size;
-    if (compressImages) {
-      const compressedSize = await compressImageInPlace(blobPath(file.filename), { mimeType, size: fileSize });
-      if (compressedSize) fileSize = compressedSize;
-    }
-    const created_ = {
-      id: crypto.randomUUID(),
-      name,
-      type: 'file',
-      parentId: folder.id,
+    assertQuota(node.ownerId, size);
+    const session = await startSession({
+      uploader: { shareToken: node.shareToken },
       ownerId: node.ownerId,
-      size: fileSize,
-      mimeType,
-      blobName: file.filename,
-      trashed: false,
-      trashedAt: null,
-      createdAt: now,
-      updatedAt: now,
-    };
-    const contentText = await extractText(blobPath(file.filename), { mimeType, name, size: fileSize });
-    if (contentText) created_.contentText = contentText;
-    const thumbnailBlobName = await maybeGenerateThumbnail(mimeType, blobPath(file.filename));
-    if (thumbnailBlobName) created_.thumbnailBlobName = thumbnailBlobName;
-    state.nodes.push(created_);
-    created.push(created_);
-  }
-
-  if (created.length) {
-    logActivity({
-      userId: node.ownerId,
-      username: owner?.username,
-      action: 'share_upload',
-      targetName: created.length === 1 ? created[0].name : `${created.length} files`,
-      details: `via shared link into "${folder.name}"`,
+      parentId: folder.id,
+      name: body.name,
+      mimeType: body.mimeType,
+      size,
+      onConflict: 'rename',
     });
+    res.status(201).json({ sessionId: session.id });
+  } catch (err) {
+    sendError(res, err);
   }
-  await save();
-  res.status(201).json({ items: created.map(publicSerialize) });
+});
+
+router.put('/:token/upload-sessions/:sessionId/chunk', requireFetchHeader, rawChunkBody, async (req, res) => {
+  const loaded = loadShareSession(req, res);
+  if (!loaded) return;
+  await writeChunk(req, res, loaded.session);
+});
+
+router.post('/:token/upload-sessions/:sessionId/complete', requireFetchHeader, async (req, res) => {
+  const loaded = loadShareSession(req, res);
+  if (!loaded) return;
+  try {
+    const owner = findUserById(loaded.node.ownerId);
+    const { node } = await completeSession(loaded.session, {
+      actorName: owner?.username,
+      activityAction: 'share_upload',
+      activityDetails: `via shared link into "${loaded.node.name}"`,
+    });
+    res.status(201).json({ item: publicSerialize(node) });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+router.delete('/:token/upload-sessions/:sessionId', requireFetchHeader, async (req, res) => {
+  const loaded = loadShareSession(req, res);
+  if (!loaded) return;
+  await cancelSession(loaded.session);
+  res.json({ ok: true });
 });
 
 export default router;

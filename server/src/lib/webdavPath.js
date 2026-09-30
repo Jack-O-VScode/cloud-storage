@@ -16,8 +16,11 @@ export function resolveNode(ownerId, segments) {
   let parentId = null;
   let node = null;
   for (let i = 0; i < segments.length; i++) {
-    const candidates = childrenOf(ownerId, parentId).filter((n) => n.name === segments[i]);
-    node = candidates[0];
+    // Case-insensitive like Windows/macOS themselves, preferring an exact
+    // match should two names differ only in case.
+    const lower = segments[i].toLowerCase();
+    const candidates = childrenOf(ownerId, parentId).filter((n) => n.name.toLowerCase() === lower);
+    node = candidates.find((n) => n.name === segments[i]) || candidates[0];
     if (!node) return null;
     if (i < segments.length - 1 && node.type !== 'folder') return null;
     parentId = node.id;

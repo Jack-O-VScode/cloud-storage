@@ -51,9 +51,26 @@ function TextPreview({ node }) {
   );
 }
 
-export default function PreviewModal({ node, onClose }) {
+// `siblings` (optional) are the other files in the list the preview was
+// opened from - arrow keys / the ‹ › buttons step through them, so a
+// folder of photos can be flicked through without closing the preview.
+export default function PreviewModal({ node, siblings = [], onNavigate, onClose }) {
   const category = mimeCategory(node);
   const url = api.previewUrl(node.id);
+  const index = siblings.findIndex((s) => s.id === node.id);
+  const prev = index > 0 ? siblings[index - 1] : null;
+  const next = index >= 0 && index < siblings.length - 1 ? siblings[index + 1] : null;
+
+  useEffect(() => {
+    if (!onNavigate) return undefined;
+    const onKey = (e) => {
+      if (e.target.closest?.('input, textarea, select, video, audio')) return;
+      if (e.key === 'ArrowLeft' && prev) onNavigate(prev);
+      if (e.key === 'ArrowRight' && next) onNavigate(next);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [prev, next, onNavigate]);
 
   let body;
   if (category === 'image') {
@@ -86,6 +103,19 @@ export default function PreviewModal({ node, onClose }) {
       width={category === 'image' || category === 'video' ? 720 : 560}
       footer={
         <>
+          {onNavigate && siblings.length > 1 && (
+            <span className="preview-nav">
+              <button className="btn" onClick={() => prev && onNavigate(prev)} disabled={!prev} aria-label="Previous file">
+                ‹
+              </button>
+              <span className="muted small">
+                {index + 1} / {siblings.length}
+              </span>
+              <button className="btn" onClick={() => next && onNavigate(next)} disabled={!next} aria-label="Next file">
+                ›
+              </button>
+            </span>
+          )}
           <a className="btn" href={api.downloadUrl(node.id)}>
             Download
           </a>
@@ -95,7 +125,7 @@ export default function PreviewModal({ node, onClose }) {
         </>
       }
     >
-      {body}
+      <div key={node.id}>{body}</div>
     </Modal>
   );
 }

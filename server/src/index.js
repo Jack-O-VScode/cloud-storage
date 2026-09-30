@@ -4,7 +4,8 @@ import helmet from 'helmet';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config } from './config.js';
-import { loadStore } from './store.js';
+import { loadStore, save } from './store.js';
+import { adoptOrphanedData } from './lib/accountCleanup.js';
 import authRoutes from './routes/auth.js';
 import userRoutes from './routes/users.js';
 import nodeRoutes from './routes/nodes.js';
@@ -13,6 +14,7 @@ import storageRoutes from './routes/storage.js';
 import backupRoutes from './routes/backups.js';
 import activityRoutes from './routes/activity.js';
 import grantRoutes from './routes/grants.js';
+import sharesRoutes from './routes/shares.js';
 import uploadSessionRoutes from './routes/uploadSessions.js';
 import webdavRoutes from './routes/webdav.js';
 import { scheduleTrashSweep } from './lib/trashSweep.js';
@@ -22,6 +24,7 @@ import { scheduleUploadSessionSweep } from './lib/uploadSessions.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 loadStore();
+if (adoptOrphanedData()) save();
 
 const app = express();
 app.disable('x-powered-by');
@@ -44,6 +47,7 @@ app.use('/api/storage', storageRoutes);
 app.use('/api/backups', backupRoutes);
 app.use('/api/activity', activityRoutes);
 app.use('/api/grants', grantRoutes);
+app.use('/api/shares', sharesRoutes);
 app.use('/api/upload-sessions', uploadSessionRoutes);
 // Mounted outside /api and ahead of the SPA catch-all below: WebDAV clients
 // (Explorer, Finder, rclone, ...) expect a plain path, and authenticate

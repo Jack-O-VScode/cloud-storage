@@ -1,12 +1,8 @@
 import { Router } from 'express';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
-import path from 'node:path';
 import crypto from 'node:crypto';
-import multer from 'multer';
-import mime from 'mime-types';
 const uuid = crypto.randomUUID;
-import { config } from '../config.js';
 import {
   getState,
   save,
@@ -16,16 +12,17 @@ import {
   allOwnedBy,
   logActivity,
   findBundleById,
+  grantsForNode,
 } from '../store.js';
 import { requireAuth, requireFetchHeader, hashPassword } from '../auth.js';
-import { blobPath, diskUsage } from '../lib/paths.js';
-import { isSelfOrDescendantMove, descendantsOf } from '../lib/tree.js';
+import { blobPath } from '../lib/paths.js';
+import { isSelfOrDescendantMove, buildChildrenIndex } from '../lib/tree.js';
 import { streamZip } from '../lib/zip.js';
-import { purgeNodeBlob } from '../lib/purge.js';
 import { extractText } from '../lib/textExtract.js';
-import { generateThumbnail } from '../lib/thumbnail.js';
-import { compressImageInPlace } from '../lib/imageCompress.js';
-import { hasAccess, breadcrumbFor } from '../lib/access.js';
+import { hasAccess, breadcrumbFor, viewerRole, nodesSharedWith } from '../lib/access.js';
+import { trashNode, restoreNode, isTopLevelTrashed, removeNodesPermanently } from '../lib/trash.js';
+import { maybeGenerateThumbnail } from '../lib/versions.js';
+import { sanitizeName, findSibling, uniqueName } from '../lib/names.js';
 
 const router = Router();
 
@@ -36,27 +33,16 @@ function fromClientParentId(parentId) {
   return !parentId || parentId === 'root' ? null : parentId;
 }
 
-// Strips path separators/control characters so a file or folder name can
-// never be mistaken for a path segment - matters once names feed into zip
-// entry paths, not just because it's confusing in the UI.
-function sanitizeName(raw) {
-  const cleaned = String(raw || '').replace(/[/\\\u0000-\u001f]/g, ' ').trim();
-  return cleaned || 'Untitled';
+function isLinkExpired(expiresAt) {
+  return Boolean(expiresAt) && Date.now() > expiresAt;
 }
 
-// Generates and writes a thumbnail blob for an image file, returning its
-// blob name (or null for a non-image / an image sharp couldn't decode).
-async function maybeGenerateThumbnail(mimeType, sourcePath) {
-  if (!mimeType.startsWith('image/')) return null;
-  const thumbBuf = await generateThumbnail(sourcePath);
-  if (!thumbBuf) return null;
-  const thumbName = uuid();
-  await fsp.writeFile(blobPath(thumbName), thumbBuf);
-  return thumbName;
-}
-
-function serialize(node) {
-  return {
+// `viewerId` is who's asking. Sharing details (links, who else has access)
+// are only ever included for the item's owner - a collaborator browsing a
+// shared folder mustn't be able to read the owner's public link tokens off
+// the listing. `access` tells the UI what that viewer may do with the item.
+function serialize(node, viewerId) {
+  const out = {
     id: node.id,
     name: node.name,
     type: node.type,
@@ -67,15 +53,27 @@ function serialize(node) {
     trashedAt: node.trashedAt || null,
     createdAt: node.createdAt,
     updatedAt: node.updatedAt,
-    shared: Boolean(node.shareToken),
-    shareToken: node.shareToken || null,
-    shareExpiresAt: node.shareExpiresAt || null,
-    sharePasswordProtected: Boolean(node.sharePasswordHash),
-    shareUploadEnabled: node.type === 'folder' ? Boolean(node.shareUploadEnabled) : false,
     starred: Boolean(node.starred),
     versionCount: (node.versions || []).length,
     commentCount: (node.comments || []).length,
+    access: viewerId ? viewerRole(node, viewerId) : 'owner',
   };
+  if (viewerId && node.ownerId !== viewerId) {
+    const owner = findUserById(node.ownerId);
+    out.ownerUsername = owner?.username || null;
+    return out;
+  }
+  const sharedWithCount = grantsForNode(node.id).length;
+  const inLinkBundle = getState().bundles.some((b) => b.nodeIds.includes(node.id));
+  out.shareToken = node.shareToken || null;
+  out.shareExpiresAt = node.shareExpiresAt || null;
+  out.shareExpired = Boolean(node.shareToken) && isLinkExpired(node.shareExpiresAt);
+  out.sharePasswordProtected = Boolean(node.sharePasswordHash);
+  out.shareUploadEnabled = node.type === 'folder' ? Boolean(node.shareUploadEnabled) : false;
+  out.sharedWithCount = sharedWithCount;
+  out.inLinkBundle = inLinkBundle;
+  out.shared = Boolean(node.shareToken) || sharedWithCount > 0 || inLinkBundle;
+  return out;
 }
 
 function serializeComment(c) {
@@ -87,11 +85,13 @@ function serializeBundle(bundle) {
     id: bundle.id,
     token: bundle.token,
     expiresAt: bundle.expiresAt || null,
+    expired: isLinkExpired(bundle.expiresAt),
     passwordProtected: Boolean(bundle.passwordHash),
+    createdAt: bundle.createdAt,
     items: bundle.nodeIds
       .map((id) => findNodeById(id))
       .filter((n) => n && !n.trashed)
-      .map(serialize),
+      .map((n) => serialize(n, bundle.ownerId)),
   };
 }
 
@@ -153,6 +153,7 @@ router.get('/', requireAuth, (req, res) => {
   const parentId = fromClientParentId(req.query.parentId);
   if (!assertParentIsUsableFolder(req, res, parentId, 'view')) return;
   const parent = parentId ? findNodeById(parentId) : null;
+  const uid = req.user.id;
 
   const sortBy = SORT_FIELDS.has(req.query.sortBy) ? req.query.sortBy : 'name';
   const sortDir = req.query.sortDir === 'desc' ? 'desc' : 'asc';
@@ -160,31 +161,40 @@ router.get('/', requireAuth, (req, res) => {
   const limit = Math.min(MAX_PAGE_SIZE, Math.max(1, parseInt(req.query.limit, 10) || DEFAULT_PAGE_SIZE));
 
   // A null parentId always means "my own drive root" - a grant can only
-  // ever target a specific folder, never someone else's whole root.
+  // ever target a specific item, never someone else's whole root.
   const allItems = (
-    parent ? getState().nodes.filter((n) => n.parentId === parent.id && !n.trashed) : childrenOf(req.user.id, parentId)
+    parent ? getState().nodes.filter((n) => n.parentId === parent.id && !n.trashed) : childrenOf(uid, parentId)
   ).sort((a, b) => compareNodes(a, b, sortBy, sortDir));
 
   const page = allItems.slice(offset, offset + limit);
+  const access = parent ? viewerRole(parent, uid) : 'owner';
 
   res.json({
-    items: page.map(serialize),
-    breadcrumb: parent ? breadcrumbFor(parent, req.user.id).map(serialize) : [],
+    items: page.map((n) => serialize(n, uid)),
+    breadcrumb: parent ? breadcrumbFor(parent, uid).map((n) => serialize(n, uid)) : [],
+    // What the viewer may do in this folder as a whole (new folder, upload,
+    // ...) - 'owner' in their own drive, else the level they were granted.
+    access,
+    ownerUsername: parent && access !== 'owner' ? findUserById(parent.ownerId)?.username || null : null,
     total: allItems.length,
     hasMore: offset + page.length < allItems.length,
   });
 });
 
 router.get('/trash', requireAuth, (req, res) => {
-  const items = allOwnedBy(req.user.id).filter((n) => n.trashed);
+  const items = allOwnedBy(req.user.id).filter(isTopLevelTrashed);
   items.sort((a, b) => (b.trashedAt || 0) - (a.trashedAt || 0));
-  res.json({ items: items.map(serialize) });
+  res.json({ items: items.map((n) => serialize(n, req.user.id)) });
 });
 
 router.get('/search', requireAuth, (req, res) => {
   const q = String(req.query.q || '').trim().toLowerCase();
   if (!q) return res.json({ items: [] });
-  const items = allOwnedBy(req.user.id).filter((n) => {
+  const uid = req.user.id;
+  // Your own drive plus everything shared with you - a search shouldn't
+  // miss a file just because it lives in someone else's shared folder.
+  const candidates = [...allOwnedBy(uid), ...nodesSharedWith(uid, buildChildrenIndex())];
+  const items = candidates.filter((n) => {
     if (n.trashed) return false;
     if (n.name.toLowerCase().includes(q)) return true;
     return Boolean(n.contentText && n.contentText.toLowerCase().includes(q));
@@ -192,8 +202,8 @@ router.get('/search', requireAuth, (req, res) => {
   // Content-only matches (the query isn't in the name) get flagged so the
   // UI can explain why a result showed up.
   res.json({
-    items: items.map((n) => ({
-      ...serialize(n),
+    items: items.slice(0, 500).map((n) => ({
+      ...serialize(n, uid),
       contentMatch: !n.name.toLowerCase().includes(q) && Boolean(n.contentText),
     })),
   });
@@ -202,7 +212,7 @@ router.get('/search', requireAuth, (req, res) => {
 router.get('/starred', requireAuth, (req, res) => {
   const items = allOwnedBy(req.user.id).filter((n) => n.starred && !n.trashed);
   items.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
-  res.json({ items: items.map(serialize) });
+  res.json({ items: items.map((n) => serialize(n, req.user.id)) });
 });
 
 const RECENT_LIMIT = 50;
@@ -215,13 +225,60 @@ router.get('/recent', requireAuth, (req, res) => {
     .filter((n) => n.type === 'file' && !n.trashed)
     .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
     .slice(0, RECENT_LIMIT);
-  res.json({ items: items.map(serialize) });
+  res.json({ items: items.map((n) => serialize(n, req.user.id)) });
+});
+
+// Before an upload starts, tells the client which of the files it's about
+// to send would land on a name that's already taken - so it can ask
+// "replace, keep both, or skip?" up front. `paths` are the same relative
+// paths an upload sends ("Photos/2024/a.jpg", or just "a.jpg"); only
+// folders that already exist are followed, since anything inside a folder
+// the upload is about to create can't clash with anything.
+router.post('/check-conflicts', requireFetchHeader, requireAuth, (req, res) => {
+  const parentId = fromClientParentId(req.body?.parentId);
+  if (!assertParentIsUsableFolder(req, res, parentId, 'upload')) return;
+  const paths = Array.isArray(req.body?.paths) ? req.body.paths.slice(0, 100000) : [];
+  const parent = parentId ? findNodeById(parentId) : null;
+  const ownerId = parent ? parent.ownerId : req.user.id;
+
+  const byParent = new Map();
+  for (const n of getState().nodes) {
+    if (n.ownerId !== ownerId || n.trashed) continue;
+    const key = n.parentId ?? 'root';
+    let names = byParent.get(key);
+    if (!names) byParent.set(key, (names = new Map()));
+    names.set(n.name.toLowerCase(), n);
+  }
+  const lookup = (pid, name) => byParent.get(pid ?? 'root')?.get(name.toLowerCase());
+
+  const conflicts = [];
+  paths.forEach((rawPath, index) => {
+    const segments = String(rawPath || '').split('/').filter(Boolean).map(sanitizeName);
+    if (!segments.length) return;
+    let pid = parentId;
+    for (const folderName of segments.slice(0, -1)) {
+      const folder = lookup(pid, folderName);
+      if (!folder || folder.type !== 'folder') return;
+      pid = folder.id;
+    }
+    const existing = lookup(pid, segments[segments.length - 1]);
+    if (!existing) return;
+    conflicts.push({
+      index,
+      path: rawPath,
+      existing: serialize(existing, req.user.id),
+    });
+  });
+  res.json({ conflicts });
 });
 
 router.get('/:id', requireAuth, (req, res) => {
   const node = loadAccessibleNode(req, res, 'view');
   if (!node) return;
-  res.json({ item: serialize(node), breadcrumb: breadcrumbFor(node, req.user.id).map(serialize) });
+  res.json({
+    item: serialize(node, req.user.id),
+    breadcrumb: breadcrumbFor(node, req.user.id).map((n) => serialize(n, req.user.id)),
+  });
 });
 
 router.post('/folder', requireFetchHeader, requireAuth, (req, res) => {
@@ -234,11 +291,15 @@ router.post('/folder', requireFetchHeader, requireAuth, (req, res) => {
   // collaborator who created it.
   const parent = parentId ? findNodeById(parentId) : null;
   const ownerId = parent ? parent.ownerId : req.user.id;
+  const name = sanitizeName(rawName);
+  if (findSibling(ownerId, parentId, name)) {
+    return res.status(409).json({ error: `Something named "${name}" is already in this folder` });
+  }
   const state = getState();
   const now = Date.now();
   const node = {
     id: uuid(),
-    name: sanitizeName(rawName),
+    name,
     type: 'folder',
     parentId,
     ownerId,
@@ -250,52 +311,41 @@ router.post('/folder', requireFetchHeader, requireAuth, (req, res) => {
   state.nodes.push(node);
   logActivity({ userId: req.user.id, username: req.user.username, action: 'create_folder', targetName: node.name });
   save();
-  res.status(201).json({ item: serialize(node) });
-});
-
-const upload = multer({
-  storage: multer.diskStorage({
-    destination: (req, file, cb) => cb(null, config.blobDir),
-    filename: (req, file, cb) => cb(null, uuid()),
-  }),
-  limits: {
-    fileSize: config.maxUploadBytes,
-    // No `files` limit here - omitting it (rather than passing a number to
-    // upload.array below) means an unlimited number of files per batch.
-    // fieldSize is bumped because the relativePaths JSON field (one path
-    // per file, for folder uploads) can otherwise hit busboy's 1MB default
-    // on a folder with tens of thousands of files.
-    fieldSize: 50 * 1024 * 1024,
-  },
+  res.status(201).json({ item: serialize(node, req.user.id) });
 });
 
 // Resolves (creating as needed) the chain of subfolders described by
 // `segments` under `baseParentId`, reusing folders already created earlier
 // in the same upload batch (via `cache`) so a folder with many files isn't
-// recreated once per file.
+// recreated once per file. An existing folder of the same name is merged
+// into, the way copying a folder onto a desktop merges it.
 function resolveFolderChain(ownerId, baseParentId, segments, cache) {
   let parentId = baseParentId;
-  for (const name of segments) {
-    const cacheKey = `${parentId ?? 'root'}\u0000${name}`;
+  for (const rawName of segments) {
+    const name = sanitizeName(rawName);
+    const cacheKey = `${parentId ?? 'root'}\u0000${name.toLowerCase()}`;
     const cached = cache.get(cacheKey);
     if (cached) {
       parentId = cached;
       continue;
     }
     const state = getState();
+    const lower = name.toLowerCase();
     let folder = state.nodes.find(
       (n) =>
         n.ownerId === ownerId &&
         n.parentId === parentId &&
         n.type === 'folder' &&
         !n.trashed &&
-        n.name === name
+        n.name.toLowerCase() === lower
     );
     if (!folder) {
       const now = Date.now();
       folder = {
         id: uuid(),
-        name,
+        // A *file* can already hold this name - don't create a second
+        // item with the exact same name next to it.
+        name: uniqueName(ownerId, parentId, name),
         type: 'folder',
         parentId,
         ownerId,
@@ -311,105 +361,6 @@ function resolveFolderChain(ownerId, baseParentId, segments, cache) {
   }
   return parentId;
 }
-
-router.post('/upload', requireFetchHeader, requireAuth, upload.array('files'), async (req, res) => {
-  const parentId = fromClientParentId(req.body?.parentId);
-  if (!assertParentIsUsableFolder(req, res, parentId, 'upload')) {
-    // Clean up anything multer already wrote to disk before we reject.
-    await Promise.all((req.files || []).map((f) => fsp.unlink(f.path).catch(() => {})));
-    return;
-  }
-  // Uploading into someone else's shared folder counts against THEIR quota
-  // and creates files THEY own, same as the existing upload-enabled public
-  // share links - not the collaborator doing the uploading.
-  const parent = parentId ? findNodeById(parentId) : null;
-  const ownerId = parent ? parent.ownerId : req.user.id;
-  const owner = findUserById(ownerId);
-  const compressImages = Boolean(owner?.preferences?.compressImages);
-
-  const quotaBytes = owner?.quotaBytes;
-  if (quotaBytes) {
-    const incomingBytes = (req.files || []).reduce((sum, f) => sum + f.size, 0);
-    const currentlyUsed = allOwnedBy(ownerId)
-      .filter((n) => n.type === 'file' && !n.trashed)
-      .reduce((sum, n) => sum + (n.size || 0), 0);
-    if (currentlyUsed + incomingBytes > quotaBytes) {
-      await Promise.all((req.files || []).map((f) => fsp.unlink(f.path).catch(() => {})));
-      return res.status(413).json({
-        error: `This upload would exceed the storage quota (${(quotaBytes / 1e9).toFixed(1)}GB). Free up space or ask an admin to raise the quota.`,
-      });
-    }
-  }
-
-  // Optional JSON array of relative paths (e.g. "Photos/2024/img.jpg"),
-  // one per uploaded file in the same order, sent when uploading a folder
-  // (drag-and-drop or the folder picker) so its structure can be recreated
-  // as real subfolders instead of dumping every file flat into parentId.
-  let relativePaths = [];
-  if (req.body?.relativePaths) {
-    try {
-      relativePaths = JSON.parse(req.body.relativePaths);
-    } catch {
-      relativePaths = [];
-    }
-  }
-
-  const state = getState();
-  const now = Date.now();
-  const created = [];
-  const folderCache = new Map();
-
-  for (let i = 0; i < (req.files || []).length; i++) {
-    const file = req.files[i];
-    let targetParentId = parentId;
-    const relPath = relativePaths[i];
-    if (relPath) {
-      const segments = relPath.split('/').filter(Boolean);
-      segments.pop(); // last segment is the filename itself, not a folder
-      if (segments.length) {
-        targetParentId = resolveFolderChain(ownerId, parentId, segments, folderCache);
-      }
-    }
-    const name = sanitizeName(file.originalname);
-    const mimeType = file.mimetype || mime.lookup(file.originalname) || 'application/octet-stream';
-    let fileSize = file.size;
-    if (compressImages) {
-      const compressedSize = await compressImageInPlace(blobPath(file.filename), { mimeType, size: fileSize });
-      if (compressedSize) fileSize = compressedSize;
-    }
-    const node = {
-      id: uuid(),
-      name,
-      type: 'file',
-      parentId: targetParentId,
-      ownerId,
-      size: fileSize,
-      mimeType,
-      blobName: file.filename,
-      trashed: false,
-      trashedAt: null,
-      createdAt: now,
-      updatedAt: now,
-    };
-    const contentText = await extractText(blobPath(file.filename), { mimeType, name, size: fileSize });
-    if (contentText) node.contentText = contentText;
-    const thumbnailBlobName = await maybeGenerateThumbnail(mimeType, blobPath(file.filename));
-    if (thumbnailBlobName) node.thumbnailBlobName = thumbnailBlobName;
-    state.nodes.push(node);
-    created.push(node);
-  }
-
-  if (created.length) {
-    logActivity({
-      userId: req.user.id,
-      username: req.user.username,
-      action: 'upload',
-      targetName: created.length === 1 ? created[0].name : `${created.length} files`,
-    });
-  }
-  await save();
-  res.status(201).json({ items: created.map(serialize) });
-});
 
 router.post('/zip', requireFetchHeader, requireAuth, async (req, res) => {
   const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
@@ -428,13 +379,22 @@ router.patch('/:id', requireFetchHeader, requireAuth, (req, res) => {
   const activityBase = { userId: req.user.id, username: req.user.username };
   let contentChanged = false;
 
+  // Restoring out of the trash is the owner's call alone - a collaborator
+  // never sees the trash at all.
+  if (trashed === false && node.ownerId !== req.user.id) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+
   if (typeof name === 'string') {
     const trimmed = name.trim();
     if (!trimmed) return res.status(400).json({ error: 'Name cannot be empty' });
-    const oldName = node.name;
-    node.name = sanitizeName(trimmed);
-    if (node.name !== oldName) {
-      logActivity({ ...activityBase, action: 'rename', targetName: oldName, details: `to "${node.name}"` });
+    const newName = sanitizeName(trimmed);
+    if (newName !== node.name) {
+      if (findSibling(node.ownerId, node.parentId, newName, { excludeId: node.id })) {
+        return res.status(409).json({ error: `Something named "${newName}" is already in this folder` });
+      }
+      logActivity({ ...activityBase, action: 'rename', targetName: node.name, details: `to "${newName}"` });
+      node.name = newName;
       contentChanged = true;
     }
   }
@@ -453,19 +413,22 @@ router.patch('/:id', requireFetchHeader, requireAuth, (req, res) => {
     if (node.type === 'folder' && isSelfOrDescendantMove(node.id, targetParentId)) {
       return res.status(400).json({ error: "Can't move a folder into itself" });
     }
-    node.parentId = targetParentId;
-    logActivity({ ...activityBase, action: 'move', targetName: node.name });
-    contentChanged = true;
+    if (targetParentId !== node.parentId) {
+      // Landing on a name that's already taken there keeps both, as
+      // "name (1).ext", rather than refusing the move.
+      node.name = uniqueName(node.ownerId, targetParentId, node.name);
+      node.parentId = targetParentId;
+      logActivity({ ...activityBase, action: 'move', targetName: node.name });
+      contentChanged = true;
+    }
   }
 
-  if (typeof trashed === 'boolean') {
-    node.trashed = trashed;
-    node.trashedAt = trashed ? Date.now() : null;
-    // Trashing/restoring a folder cascades to everything inside it so the
-    // trash view and quota accounting stay consistent with what's visible.
-    for (const d of descendantsOf(node.id)) {
-      d.trashed = trashed;
-      d.trashedAt = trashed ? Date.now() : null;
+  if (typeof trashed === 'boolean' && trashed !== Boolean(node.trashed)) {
+    if (trashed) trashNode(node);
+    else {
+      restoreNode(node);
+      // Its old spot may have been reused by a same-named item meanwhile.
+      node.name = uniqueName(node.ownerId, node.parentId, node.name);
     }
     logActivity({ ...activityBase, action: trashed ? 'trash' : 'restore', targetName: node.name });
     contentChanged = true;
@@ -482,26 +445,18 @@ router.patch('/:id', requireFetchHeader, requireAuth, (req, res) => {
 
   if (contentChanged) node.updatedAt = Date.now();
   save();
-  res.json({ item: serialize(node) });
+  res.json({ item: serialize(node, req.user.id) });
 });
 
-const purgeNode = purgeNodeBlob;
-
 router.delete('/trash', requireFetchHeader, requireAuth, async (req, res) => {
-  const state = getState();
-  const trashedIds = new Set(
-    state.nodes.filter((n) => n.ownerId === req.user.id && n.trashed).map((n) => n.id)
-  );
-  await Promise.all(
-    state.nodes.filter((n) => trashedIds.has(n.id)).map((n) => purgeNode(n))
-  );
-  state.nodes = state.nodes.filter((n) => !trashedIds.has(n.id));
-  if (trashedIds.size) {
+  const roots = getState().nodes.filter((n) => n.ownerId === req.user.id && isTopLevelTrashed(n));
+  const removed = await removeNodesPermanently(roots);
+  if (removed) {
     logActivity({
       userId: req.user.id,
       username: req.user.username,
       action: 'empty_trash',
-      targetName: `${trashedIds.size} item(s)`,
+      targetName: `${roots.length} item(s)`,
     });
   }
   await save();
@@ -514,11 +469,7 @@ router.delete('/:id', requireFetchHeader, requireAuth, async (req, res) => {
   if (!node.trashed) {
     return res.status(400).json({ error: 'Move to trash before deleting permanently' });
   }
-  const state = getState();
-  const toRemove = [node, ...descendantsOf(node.id)];
-  await Promise.all(toRemove.map((n) => purgeNode(n)));
-  const removeIds = new Set(toRemove.map((n) => n.id));
-  state.nodes = state.nodes.filter((n) => !removeIds.has(n.id));
+  await removeNodesPermanently([node]);
   logActivity({
     userId: req.user.id,
     username: req.user.username,
@@ -529,28 +480,40 @@ router.delete('/:id', requireFetchHeader, requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
+// Applies link settings from a request body to anything link-shareable (a
+// node, whose fields are share-prefixed so they don't collide with its own,
+// or a multi-item link, which only ever holds link state). Only fields
+// actually present in the body are touched - the client can't safely
+// re-send a password it's never given back, so omitting one means "leave
+// it as-is" rather than "clear it".
+function applyLinkSettings(target, body, fields) {
+  const { expiresInMs, password } = body || {};
+  if (expiresInMs !== undefined) {
+    target[fields.expiresAt] = typeof expiresInMs === 'number' && expiresInMs > 0 ? Date.now() + expiresInMs : null;
+  }
+  if (password !== undefined) {
+    target[fields.passwordHash] = password ? hashPassword(String(password)) : null;
+  }
+}
+
 router.post('/:id/share', requireFetchHeader, requireAuth, (req, res) => {
   const node = loadOwnedNode(req, res);
   if (!node) return;
-  const { expiresInMs, password, uploadEnabled } = req.body || {};
+  if (node.trashed) return res.status(400).json({ error: "Restore this item from the trash before sharing it" });
   // Keep the existing token (if any) so changing just the expiry/password
-  // doesn't invalidate a link already handed out. Both settings are only
-  // touched when explicitly present in the body - the client can't safely
-  // re-send a password it's never given back, so omitting the field means
-  // "leave it as-is" rather than "clear it".
-  if (!node.shareToken) node.shareToken = crypto.randomBytes(24).toString('base64url');
-  if (expiresInMs !== undefined) {
-    node.shareExpiresAt = typeof expiresInMs === 'number' && expiresInMs > 0 ? Date.now() + expiresInMs : null;
-  }
-  if (password !== undefined) {
-    node.sharePasswordHash = password ? hashPassword(password) : null;
-  }
+  // doesn't invalidate a link already handed out.
+  const isNew = !node.shareToken;
+  if (isNew) node.shareToken = crypto.randomBytes(24).toString('base64url');
+  applyLinkSettings(node, req.body, { expiresAt: 'shareExpiresAt', passwordHash: 'sharePasswordHash' });
+  const { uploadEnabled } = req.body || {};
   if (uploadEnabled !== undefined && node.type === 'folder') {
     node.shareUploadEnabled = Boolean(uploadEnabled);
   }
-  logActivity({ userId: req.user.id, username: req.user.username, action: 'share', targetName: node.name });
+  if (isNew) {
+    logActivity({ userId: req.user.id, username: req.user.username, action: 'share', targetName: node.name });
+  }
   save();
-  res.json({ item: serialize(node), shareToken: node.shareToken });
+  res.json({ item: serialize(node, req.user.id), shareToken: node.shareToken });
 });
 
 router.delete('/:id/share', requireFetchHeader, requireAuth, (req, res) => {
@@ -562,12 +525,12 @@ router.delete('/:id/share', requireFetchHeader, requireAuth, (req, res) => {
   node.shareUploadEnabled = false;
   logActivity({ userId: req.user.id, username: req.user.username, action: 'unshare', targetName: node.name });
   save();
-  res.json({ item: serialize(node) });
+  res.json({ item: serialize(node, req.user.id) });
 });
 
-// A "bundle" shares an arbitrary set of files/folders (possibly from
-// different parents) behind one link/token, distinct from the single-node
-// share above which always ties a token to exactly one node's subtree.
+// A multi-item link shares an arbitrary set of files/folders (possibly
+// from different parents) behind one token, distinct from the single-item
+// link above which always ties a token to exactly one node's subtree.
 router.post('/share-bundle', requireFetchHeader, requireAuth, (req, res) => {
   const ids = Array.isArray(req.body?.ids) ? [...new Set(req.body.ids)] : [];
   const items = ids
@@ -585,6 +548,7 @@ router.post('/share-bundle', requireFetchHeader, requireAuth, (req, res) => {
     expiresAt: null,
     createdAt: Date.now(),
   };
+  applyLinkSettings(bundle, req.body, { expiresAt: 'expiresAt', passwordHash: 'passwordHash' });
   state.bundles.push(bundle);
   logActivity({
     userId: req.user.id,
@@ -596,94 +560,37 @@ router.post('/share-bundle', requireFetchHeader, requireAuth, (req, res) => {
   res.status(201).json({ bundle: serializeBundle(bundle) });
 });
 
-router.patch('/share-bundle/:id', requireFetchHeader, requireAuth, (req, res) => {
+function loadOwnedBundle(req, res) {
   const bundle = findBundleById(req.params.id);
-  if (!bundle || bundle.ownerId !== req.user.id) return res.status(404).json({ error: 'Not found' });
-  const { expiresInMs, password } = req.body || {};
-  if (expiresInMs !== undefined) {
-    bundle.expiresAt = typeof expiresInMs === 'number' && expiresInMs > 0 ? Date.now() + expiresInMs : null;
+  if (!bundle || bundle.ownerId !== req.user.id) {
+    res.status(404).json({ error: 'Not found' });
+    return null;
   }
-  if (password !== undefined) {
-    bundle.passwordHash = password ? hashPassword(password) : null;
-  }
+  return bundle;
+}
+
+router.get('/share-bundle/:id', requireAuth, (req, res) => {
+  const bundle = loadOwnedBundle(req, res);
+  if (!bundle) return;
+  res.json({ bundle: serializeBundle(bundle) });
+});
+
+router.patch('/share-bundle/:id', requireFetchHeader, requireAuth, (req, res) => {
+  const bundle = loadOwnedBundle(req, res);
+  if (!bundle) return;
+  applyLinkSettings(bundle, req.body, { expiresAt: 'expiresAt', passwordHash: 'passwordHash' });
   save();
   res.json({ bundle: serializeBundle(bundle) });
 });
 
 router.delete('/share-bundle/:id', requireFetchHeader, requireAuth, (req, res) => {
-  const bundle = findBundleById(req.params.id);
-  if (!bundle || bundle.ownerId !== req.user.id) return res.status(404).json({ error: 'Not found' });
+  const bundle = loadOwnedBundle(req, res);
+  if (!bundle) return;
   const state = getState();
   state.bundles = state.bundles.filter((b) => b.id !== bundle.id);
-  logActivity({ userId: req.user.id, username: req.user.username, action: 'unshare', targetName: 'shared selection' });
+  logActivity({ userId: req.user.id, username: req.user.username, action: 'unshare', targetName: 'multi-item link' });
   save();
   res.json({ ok: true });
-});
-
-const MAX_VERSIONS = 10;
-
-// Re-uploading over an existing file (rather than uploading it fresh)
-// keeps the previous blob around as a version instead of overwriting it
-// silently, so a bad overwrite is always recoverable.
-router.post('/:id/version', requireFetchHeader, requireAuth, upload.single('file'), async (req, res) => {
-  const node = loadAccessibleNode(req, res, 'edit');
-  if (!node) {
-    if (req.file) await fsp.unlink(req.file.path).catch(() => {});
-    return;
-  }
-  if (node.type !== 'file') {
-    if (req.file) await fsp.unlink(req.file.path).catch(() => {});
-    return res.status(400).json({ error: 'Not a file' });
-  }
-  if (!req.file) return res.status(400).json({ error: 'No file provided' });
-
-  const quotaBytes = findUserById(node.ownerId)?.quotaBytes;
-  if (quotaBytes) {
-    const currentlyUsed = allOwnedBy(node.ownerId)
-      .filter((n) => n.type === 'file' && !n.trashed)
-      .reduce((sum, n) => sum + (n.size || 0), 0);
-    const netIncrease = req.file.size - (node.size || 0);
-    if (netIncrease > 0 && currentlyUsed + netIncrease > quotaBytes) {
-      await fsp.unlink(req.file.path).catch(() => {});
-      return res.status(413).json({ error: 'This new version would exceed your storage quota.' });
-    }
-  }
-
-  node.versions ||= [];
-  node.versions.push({
-    id: uuid(),
-    blobName: node.blobName,
-    size: node.size,
-    mimeType: node.mimeType,
-    createdAt: node.updatedAt || node.createdAt,
-  });
-  while (node.versions.length > MAX_VERSIONS) {
-    const dropped = node.versions.shift();
-    await fsp.unlink(blobPath(dropped.blobName)).catch(() => {});
-  }
-
-  const mimeType = req.file.mimetype || mime.lookup(req.file.originalname) || 'application/octet-stream';
-  let fileSize = req.file.size;
-  if (findUserById(node.ownerId)?.preferences?.compressImages) {
-    const compressedSize = await compressImageInPlace(blobPath(req.file.filename), { mimeType, size: fileSize });
-    if (compressedSize) fileSize = compressedSize;
-  }
-  const oldThumbnailBlobName = node.thumbnailBlobName;
-  node.blobName = req.file.filename;
-  node.size = fileSize;
-  node.mimeType = mimeType;
-  node.updatedAt = Date.now();
-  const contentText = await extractText(blobPath(req.file.filename), { mimeType, name: node.name, size: fileSize });
-  if (contentText) node.contentText = contentText;
-  else delete node.contentText;
-  const thumbnailBlobName = await maybeGenerateThumbnail(mimeType, blobPath(req.file.filename));
-  if (thumbnailBlobName) node.thumbnailBlobName = thumbnailBlobName;
-  else delete node.thumbnailBlobName;
-  if (oldThumbnailBlobName) await fsp.unlink(blobPath(oldThumbnailBlobName)).catch(() => {});
-
-  logActivity({ userId: req.user.id, username: req.user.username, action: 'new_version', targetName: node.name });
-  await save();
-  res.status(201).json({ item: serialize(node) });
 });
 
 router.get('/:id/versions', requireAuth, (req, res) => {
@@ -742,7 +649,7 @@ router.post('/:id/versions/:versionId/restore', requireFetchHeader, requireAuth,
 
   logActivity({ userId: req.user.id, username: req.user.username, action: 'restore_version', targetName: node.name });
   await save();
-  res.json({ item: serialize(node) });
+  res.json({ item: serialize(node, req.user.id) });
 });
 
 const MAX_COMMENT_LENGTH = 2000;
@@ -780,9 +687,12 @@ router.delete('/:id/comments/:commentId', requireFetchHeader, requireAuth, (req,
   const comments = node.comments || [];
   const comment = comments.find((c) => c.id === req.params.commentId);
   if (!comment) return res.status(404).json({ error: 'Comment not found' });
-  // Only the person who wrote a comment can remove it - "view" access to
-  // the node is not moderation rights over other people's notes on it.
-  if (comment.userId !== req.user.id) return res.status(403).json({ error: 'Not your comment' });
+  // The person who wrote a comment can remove it, and so can the item's
+  // owner - but "view" access alone is no moderation right over other
+  // people's notes.
+  if (comment.userId !== req.user.id && node.ownerId !== req.user.id) {
+    return res.status(403).json({ error: 'Not your comment' });
+  }
   node.comments = comments.filter((c) => c.id !== comment.id);
   save();
   res.json({ comments: node.comments.map(serializeComment) });
@@ -806,9 +716,22 @@ function streamFile(req, res, node) {
       return;
     }
     const match = /bytes=(\d*)-(\d*)/.exec(range);
-    let start = match?.[1] ? parseInt(match[1], 10) : 0;
-    let end = match?.[2] ? parseInt(match[2], 10) : stat.size - 1;
-    if (Number.isNaN(start) || Number.isNaN(end) || start > end || end >= stat.size) {
+    if (!match || (!match[1] && !match[2])) {
+      res.setHeader('Content-Range', `bytes */${stat.size}`);
+      return res.status(416).end();
+    }
+    let start;
+    let end;
+    if (!match[1]) {
+      // "bytes=-500" is a suffix range: the LAST 500 bytes.
+      start = Math.max(0, stat.size - parseInt(match[2], 10));
+      end = stat.size - 1;
+    } else {
+      start = parseInt(match[1], 10);
+      // An end past the last byte is clamped, not rejected (RFC 9110).
+      end = match[2] ? Math.min(parseInt(match[2], 10), stat.size - 1) : stat.size - 1;
+    }
+    if (Number.isNaN(start) || Number.isNaN(end) || start > end || start >= stat.size) {
       res.setHeader('Content-Range', `bytes */${stat.size}`);
       return res.status(416).end();
     }
@@ -848,6 +771,9 @@ export {
   resolveFolderChain,
   sanitizeName,
   serialize,
+  serializeBundle,
   fromClientParentId,
+  loadAccessibleNode,
+  isLinkExpired,
 };
 export default router;

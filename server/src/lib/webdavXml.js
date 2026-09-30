@@ -66,3 +66,34 @@ export function lockResponse(token, timeoutSeconds) {
 </D:lockdiscovery>
 </D:prop>`;
 }
+
+// Answers a PROPPATCH by reporting every property the client tried to set
+// or remove as successfully handled. Namespace declarations from the
+// request are carried over onto the response root so each echoed
+// property keeps its own namespace (Windows uses its own for timestamps).
+export function proppatchResponse(href, requestXml) {
+  const nsDecls = new Map();
+  for (const m of requestXml.matchAll(/xmlns(?::([\w.-]+))?\s*=\s*"([^"]*)"/g)) {
+    if (m[1] && m[1] !== 'D') nsDecls.set(m[1], m[2]);
+  }
+  const props = new Set();
+  for (const block of requestXml.matchAll(/<(?:[\w.-]+:)?prop\b[^>]*>([\s\S]*?)<\/(?:[\w.-]+:)?prop>/g)) {
+    for (const m of block[1].matchAll(/<([\w.-]+:)?([\w.-]+)[\s/>]/g)) {
+      const prefix = m[1] ? m[1].slice(0, -1) : null;
+      if (prefix && prefix !== 'D' && !nsDecls.has(prefix)) continue;
+      props.add(prefix ? `${prefix}:${m[2]}` : `D:${m[2]}`);
+    }
+  }
+  const nsAttrs = [...nsDecls].map(([p, uri]) => ` xmlns:${p}="${xmlEscape(uri)}"`).join('');
+  const propXml = [...props].map((p) => `<${p}/>`).join('');
+  return `<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:"${nsAttrs}>
+<D:response>
+<D:href>${xmlEscape(href)}</D:href>
+<D:propstat>
+<D:prop>${propXml}</D:prop>
+<D:status>HTTP/1.1 200 OK</D:status>
+</D:propstat>
+</D:response>
+</D:multistatus>`;
+}

@@ -1,13 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { api, uploadFiles, uploadVersion, downloadZip } from '../api.js';
+import { api, downloadZip } from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useToast } from '../components/Toasts.jsx';
 import ItemsList from '../components/ItemsList.jsx';
-import Icon from '../components/Icon.jsx';
 import TextPromptModal from '../components/TextPromptModal.jsx';
 import MoveModal from '../components/MoveModal.jsx';
-import ShareModal from '../components/ShareModal.jsx';
-import BundleShareModal from '../components/BundleShareModal.jsx';
+import ShareDialog, { linkUrl } from '../components/ShareDialog.jsx';
+import SharedByMe from '../components/SharedByMe.jsx';
+import ConflictDialog from '../components/ConflictDialog.jsx';
 import PreviewModal from '../components/PreviewModal.jsx';
 import UsersAdminModal from '../components/UsersAdminModal.jsx';
 import BackupsModal from '../components/BackupsModal.jsx';
@@ -17,36 +17,52 @@ import StorageModal from '../components/StorageModal.jsx';
 import CommandPalette from '../components/CommandPalette.jsx';
 import VersionHistoryModal from '../components/VersionHistoryModal.jsx';
 import CommentsModal from '../components/CommentsModal.jsx';
-import AccessModal from '../components/AccessModal.jsx';
 import { ConfirmDialog } from '../components/Modal.jsx';
-import { formatBytes, formatSpeed, formatDuration } from '../utils/format.js';
+import { enqueue, onUploadComplete } from '../uploads/uploadManager.js';
+import { formatBytes, formatSpeed } from '../utils/format.js';
 import { filesToEntries, collectFilesFromDataTransfer } from '../utils/collectFiles.js';
 
 const PAGE_SIZE = 200;
+
+const VIEW_TITLES = {
+  starred: 'Starred',
+  recent: 'Recent',
+  'shared-with-me': 'Shared with me',
+  'shared-by-me': 'Shared by me',
+  search: 'Search results',
+};
+
+const EMPTY_MESSAGES = {
+  starred: 'Nothing starred yet - tap ☆ next to anything you want to keep handy.',
+  recent: 'No files yet.',
+  'shared-with-me': 'Nobody has shared anything with you yet.',
+  search: 'No matches.',
+};
+
+const canEditRole = (access) => access === 'owner' || access === 'edit';
+const canUploadRole = (access) => access === 'owner' || access === 'edit' || access === 'upload';
 
 export default function DrivePage() {
   const { user, logout } = useAuth();
   const toast = useToast();
 
-  const [view, setView] = useState('browse'); // browse | trash | search | starred | recent | shared-with-me
+  const [view, setView] = useState('browse'); // browse | trash | search | starred | recent | shared-with-me | shared-by-me
   const [parentId, setParentId] = useState('root');
   const [breadcrumb, setBreadcrumb] = useState([]);
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
-  // Set while browsing inside a folder someone else granted us access to -
-  // `sharedPermission` is the level of that grant (view/upload/edit), and
-  // gates which actions the UI offers for the whole session.
-  const [sharedMode, setSharedMode] = useState(false);
-  const [sharedPermission, setSharedPermission] = useState(null);
-  const [sharedFolders, setSharedFolders] = useState([]);
+  // What the signed-in user may do in the folder being browsed, as reported
+  // by the server for that folder: 'owner' in their own drive, else the
+  // level someone granted them (view / upload / edit).
+  const [folderAccess, setFolderAccess] = useState('owner');
+  const [folderOwner, setFolderOwner] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [usage, setUsage] = useState(null);
   const [dragActive, setDragActive] = useState(false);
-  const [uploadPct, setUploadPct] = useState(null);
-  const [uploadStats, setUploadStats] = useState(null); // { loadedBytes, totalBytes, bytesPerSecond }
   const [downloadStats, setDownloadStats] = useState(null); // { loadedBytes, bytesPerSecond } | null
 
-  const [modal, setModal] = useState(null); // { type, node? }
+  const [modal, setModal] = useState(null); // { type, node?, items?, bundle? }
+  const [conflictPrompt, setConflictPrompt] = useState(null); // { conflicts, canReplace, resolve }
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [sortBy, setSortBy] = useState('name');
   const [sortDir, setSortDir] = useState('asc');
@@ -54,11 +70,20 @@ export default function DrivePage() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [internalDragActive, setInternalDragActive] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [sharesRefreshKey, setSharesRefreshKey] = useState(0);
+  // Phone layout: the sidebar becomes a slide-out drawer.
+  const [navOpen, setNavOpen] = useState(false);
+  const [newMenuOpen, setNewMenuOpen] = useState(false);
+  // Which view/folder the items currently on screen belong to - "Loading…"
+  // only replaces the list when switching somewhere new, not on every
+  // background refresh (e.g. each time an upload finishes).
+  const [loadedKey, setLoadedKey] = useState(null);
   const fileInputRef = useRef(null);
   const folderInputRef = useRef(null);
   const versionInputRef = useRef(null);
   const versionTargetNode = useRef(null);
   const dragCounter = useRef(0);
+  const loadMoreRef = useRef(null);
 
   // Detects a drag that originated from one of our own rows (as opposed to
   // an OS file drag) so the "drop files to upload" overlay doesn't flash
@@ -90,41 +115,45 @@ export default function DrivePage() {
     return () => window.removeEventListener('keydown', handler);
   }, []);
 
+  const viewKey = `${view}|${parentId}|${view === 'search' ? searchQuery : ''}`;
+
   const refresh = useCallback(async () => {
+    if (view === 'shared-by-me') {
+      setLoading(false);
+      return;
+    }
+    const key = `${view}|${parentId}|${view === 'search' ? searchQuery : ''}`;
     setLoading(true);
     try {
-      if (view === 'trash') {
-        const data = await api.listTrash();
-        setItems(data.items);
-        setBreadcrumb([]);
-      } else if (view === 'search') {
-        const data = await api.search(searchQuery);
-        setItems(data.items);
-        setBreadcrumb([]);
-      } else if (view === 'starred') {
-        const data = await api.listStarred();
-        setItems(data.items);
-        setBreadcrumb([]);
-      } else if (view === 'recent') {
-        const data = await api.listRecent();
-        setItems(data.items);
-        setBreadcrumb([]);
-      } else if (view === 'shared-with-me') {
-        const data = await api.listSharedWithMe();
-        setSharedFolders(data.items);
-        setItems([]);
-        setBreadcrumb([]);
-      } else {
+      let data;
+      if (view === 'trash') data = await api.listTrash();
+      else if (view === 'search') data = await api.search(searchQuery);
+      else if (view === 'starred') data = await api.listStarred();
+      else if (view === 'recent') data = await api.listRecent();
+      else if (view === 'shared-with-me') data = await api.listSharedWithMe();
+      else {
         // Sorting happens server-side (so "Load more" keeps paging through
         // one consistent order) - a fresh browse fetch always starts back
         // at the top of the folder.
-        const data = await api.listNodes(parentId, { sortBy, sortDir, offset: 0, limit: PAGE_SIZE });
-        setItems(data.items);
+        data = await api.listNodes(parentId, { sortBy, sortDir, offset: 0, limit: PAGE_SIZE });
         setBreadcrumb(data.breadcrumb);
         setHasMore(data.hasMore);
+        setFolderAccess(data.access || 'owner');
+        setFolderOwner(data.ownerUsername || null);
+      }
+      setItems(data.items);
+      setLoadedKey(key);
+      if (view !== 'browse') {
+        setBreadcrumb([]);
+        setHasMore(false);
       }
     } catch (err) {
       toast.push(err.message, 'error');
+      // The folder vanished (deleted, or access taken away) - don't leave
+      // the user staring at an error on a dead page.
+      if (view === 'browse' && parentId !== 'root' && (err.status === 400 || err.status === 404)) {
+        setParentId('root');
+      }
     } finally {
       setLoading(false);
     }
@@ -134,8 +163,8 @@ export default function DrivePage() {
     refresh();
   }, [refresh]);
 
-  const loadMore = async () => {
-    if (view !== 'browse' || loadingMore) return;
+  const loadMore = useCallback(async () => {
+    if (view !== 'browse' || loadingMore || !hasMore) return;
     setLoadingMore(true);
     try {
       const data = await api.listNodes(parentId, { sortBy, sortDir, offset: items.length, limit: PAGE_SIZE });
@@ -146,7 +175,19 @@ export default function DrivePage() {
     } finally {
       setLoadingMore(false);
     }
-  };
+  }, [view, loadingMore, hasMore, parentId, sortBy, sortDir, items.length]);
+
+  // Big folders load the next page automatically as you scroll near the
+  // end, instead of new uploads seeming to "vanish" past page one.
+  useEffect(() => {
+    const el = loadMoreRef.current;
+    if (!el || !hasMore) return undefined;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) loadMore();
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [hasMore, loadMore]);
 
   const refreshUsage = useCallback(() => {
     api.usage().then(setUsage).catch(() => {});
@@ -156,67 +197,112 @@ export default function DrivePage() {
     refreshUsage();
   }, [refreshUsage]);
 
+  // Each file that finishes uploading (from anywhere in the queue) refreshes
+  // the listing - batched, so a folder of 500 photos doesn't mean 500 reloads.
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+  useEffect(() => {
+    let timer = null;
+    const off = onUploadComplete(() => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        refreshRef.current();
+        refreshUsage();
+      }, 600);
+    });
+    return () => {
+      off();
+      clearTimeout(timer);
+    };
+  }, [refreshUsage]);
+
   const goRoot = () => {
     setView('browse');
     setParentId('root');
-    setSharedMode(false);
-    setSharedPermission(null);
+    setSearchQuery('');
   };
 
   const openFolder = (id) => {
     setView('browse');
     setParentId(id);
+    setSearchQuery('');
   };
 
-  const openSharedFolder = (entry) => {
-    setSharedMode(true);
-    setSharedPermission(entry.permission);
-    setView('browse');
-    setParentId(entry.id);
-  };
+  const fileSiblings = items.filter((i) => i.type === 'file');
 
   const openItem = (node) => {
-    if (node.type === 'folder') {
-      openFolder(node.id);
-    } else {
-      setModal({ type: 'preview', node });
-    }
+    if (node.type === 'folder') openFolder(node.id);
+    else setModal({ type: 'preview', node });
   };
+
+  // Where an upload / new folder goes: the folder being browsed, or - from
+  // any other view (Starred, Recent, Search, ...) - the top of My Drive.
+  const uploadTarget = () => {
+    if (view === 'browse') {
+      const current = breadcrumb[breadcrumb.length - 1];
+      return {
+        parentId,
+        access: folderAccess,
+        label: current ? current.name : 'My Drive',
+      };
+    }
+    return { parentId: 'root', access: 'owner', label: 'My Drive' };
+  };
+
+  // Resolves to Map<index, 'replace'|'rename'|'skip'>, or null if the user
+  // cancelled the whole upload from the conflict prompt.
+  const askAboutConflicts = (conflicts, canReplace) =>
+    new Promise((resolve) => setConflictPrompt({ conflicts, canReplace, resolve }));
 
   // `entries` is [{file, relativePath}] - relativePath is empty for a flat
   // file upload, or e.g. "Photos/2024/img.jpg" when uploading a folder, so
   // the server can recreate the folder structure instead of flattening it.
-  const doUploadEntries = async (entries) => {
-    if (entries.length === 0) return;
-    setUploadPct(0);
-    try {
-      const files = entries.map((e) => e.file);
-      const relativePaths = entries.map((e) => e.relativePath || '');
-      const hasPaths = relativePaths.some(Boolean);
-      await uploadFiles(
-        files,
-        parentId,
-        (info) => {
-          setUploadPct(info.fraction);
-          setUploadStats(info);
-        },
-        hasPaths ? relativePaths : undefined
-      );
-      toast.push(`Uploaded ${files.length} item${files.length > 1 ? 's' : ''}`, 'success');
-      refresh();
-      refreshUsage();
-    } catch (err) {
-      toast.push(err.message, 'error');
-    } finally {
-      setUploadPct(null);
-      setUploadStats(null);
+  const startUpload = async (entries) => {
+    if (!entries.length) return;
+    const target = uploadTarget();
+    if (!canUploadRole(target.access)) {
+      toast.push('You can only view this folder - ask its owner for upload access.', 'error');
+      return;
     }
+
+    let decisions = new Map();
+    try {
+      const { conflicts } = await api.checkConflicts(
+        target.parentId,
+        entries.map((e) => e.relativePath || e.file.name)
+      );
+      if (conflicts.length) {
+        const withFiles = conflicts.map((c) => ({ ...c, file: entries[c.index].file }));
+        decisions = await askAboutConflicts(withFiles, canEditRole(target.access));
+        setConflictPrompt(null);
+        if (!decisions) return;
+      }
+    } catch {
+      // Couldn't check - upload anyway; the server keeps both on a clash.
+    }
+
+    const queued = [];
+    entries.forEach((entry, i) => {
+      const decision = decisions.get(i);
+      if (decision === 'skip') return;
+      const dir = entry.relativePath ? entry.relativePath.split('/').slice(0, -1).join('/') : '';
+      queued.push({
+        file: entry.file,
+        relativePath: entry.relativePath || '',
+        targetLabel: dir ? `${target.label} › ${dir.replace(/\//g, ' › ')}` : target.label,
+        initBody: { parentId: target.parentId, onConflict: decision === 'replace' ? 'replace' : 'rename' },
+      });
+    });
+    if (!queued.length) return;
+    enqueue(queued);
+    if (view !== 'browse') toast.push(`Uploading to My Drive`, 'info');
   };
 
   // Drag-and-drop upload (files or whole folders) anywhere over the content area.
+  const canDropHere = view === 'browse' && canUploadRole(folderAccess);
   const onDragEnter = (e) => {
     e.preventDefault();
-    if (view !== 'browse') return;
+    if (!canDropHere) return;
     dragCounter.current += 1;
     setDragActive(true);
   };
@@ -230,9 +316,9 @@ export default function DrivePage() {
     e.preventDefault();
     dragCounter.current = 0;
     setDragActive(false);
-    if (view !== 'browse') return;
+    if (!canDropHere || internalDragActive) return;
     const entries = await collectFilesFromDataTransfer(e.dataTransfer);
-    if (entries.length) doUploadEntries(entries);
+    if (entries.length) startUpload(entries);
   };
 
   const onSortChange = (field) => {
@@ -249,7 +335,7 @@ export default function DrivePage() {
   // be loaded so far. Every other view fetches its whole result set in one
   // go, so sorting it here is still correct.
   const sortedItems =
-    view === 'browse'
+    view === 'browse' || view === 'trash'
       ? items
       : [...items].sort((a, b) => {
           if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
@@ -278,21 +364,21 @@ export default function DrivePage() {
     }
   };
 
-  const shareLinkFor = async (node) => {
-    if (node.shareToken) return `${window.location.origin}/s/${node.shareToken}`;
-    const { shareToken } = await api.share(node.id, {});
-    refresh();
-    return `${window.location.origin}/s/${shareToken}`;
+  const guard = (fn) => async (...args) => {
+    try {
+      await fn(...args);
+    } catch (err) {
+      toast.push(err.message, 'error');
+    }
   };
 
   const actions = {
-    download: async (node) => {
+    open: openItem,
+    download: guard(async (node) => {
       if (node.type === 'folder') {
         setDownloadStats({ loadedBytes: 0, bytesPerSecond: 0 });
         try {
           await downloadZip([node.id], setDownloadStats);
-        } catch (err) {
-          toast.push(err.message, 'error');
         } finally {
           setDownloadStats(null);
         }
@@ -301,67 +387,56 @@ export default function DrivePage() {
         a.href = api.downloadUrl(node.id);
         a.click();
       }
-    },
-    copyShareLink: async (node) => {
-      try {
-        const link = await shareLinkFor(node);
-        await navigator.clipboard.writeText(link);
-        toast.push('Share link copied', 'success');
-      } catch (err) {
-        toast.push(err.message, 'error');
+    }),
+    share: (node) => setModal({ type: 'share', items: [node] }),
+    // Copies an existing link straight away; with no link yet, opens the
+    // Share dialog instead - nothing becomes public without you seeing it.
+    copyLink: guard(async (node) => {
+      if (node.shareToken && !node.shareExpired) {
+        await navigator.clipboard.writeText(linkUrl(node.shareToken));
+        toast.push('Link copied', 'success');
+      } else {
+        setModal({ type: 'share', items: [node] });
       }
-    },
-    nativeShare: async (node) => {
-      try {
-        const link = await shareLinkFor(node);
-        await navigator.share({ title: node.name, url: link });
-      } catch (err) {
-        // AbortError just means the user closed the share sheet - not an error worth surfacing.
-        if (err.name !== 'AbortError') toast.push(err.message, 'error');
-      }
-    },
-    share: (node) => setModal({ type: 'share', node }),
+    }),
     rename: (node) => setModal({ type: 'rename', node }),
-    move: (node) => setModal({ type: 'move', node }),
-    trash: async (node) => {
+    move: (node) => setModal({ type: 'move', node, excludeIds: new Set([node.id]) }),
+    trash: guard(async (node) => {
       await api.patchNode(node.id, { trashed: true });
       toast.push(`Moved "${node.name}" to trash`, 'success', 6000, {
         label: 'Undo',
-        onClick: async () => {
+        onClick: guard(async () => {
           await api.patchNode(node.id, { trashed: false });
           refresh();
           refreshUsage();
-        },
+        }),
       });
       refresh();
       refreshUsage();
-    },
-    restore: async (node) => {
+    }),
+    restore: guard(async (node) => {
       await api.patchNode(node.id, { trashed: false });
       toast.push(`Restored "${node.name}"`, 'success');
       refresh();
       refreshUsage();
-    },
+    }),
     deleteForever: (node) => setModal({ type: 'delete-forever', node }),
-    toggleStar: async (node) => {
+    toggleStar: guard(async (node) => {
       await api.patchNode(node.id, { starred: !node.starred });
       refresh();
-    },
+    }),
     uploadVersion: (node) => {
       versionTargetNode.current = node;
       versionInputRef.current?.click();
     },
     versionHistory: (node) => setModal({ type: 'version-history', node }),
     comments: (node) => setModal({ type: 'comments', node }),
-    manageAccess: (node) => setModal({ type: 'access', node }),
+    leaveShare: guard(async (node) => {
+      await api.deleteGrant(node.grantId);
+      toast.push(`Removed "${node.name}" from Shared with me`, 'success');
+      refresh();
+    }),
   };
-
-  // sharedMode only ever applies while actively browsing inside a shared
-  // folder (view === 'browse') - every other view (Trash, Starred, Recent,
-  // Search) is always scoped to the current user's own items regardless of
-  // whatever shared folder they last had open, so it always reads as owner.
-  const viewerRole = view === 'browse' && sharedMode ? sharedPermission : 'owner';
-  const canEditHere = viewerRole === 'owner' || viewerRole === 'edit';
 
   const toggleSelect = (id) => {
     setSelectedIds((prev) => {
@@ -376,43 +451,58 @@ export default function DrivePage() {
   };
   const clearSelection = () => setSelectedIds(new Set());
   const selectedNodes = items.filter((i) => selectedIds.has(i.id));
+  const allSelectedOwned = selectedNodes.length > 0 && selectedNodes.every((n) => (n.access || 'owner') === 'owner');
+  const allSelectedEditable = selectedNodes.length > 0 && selectedNodes.every((n) => canEditRole(n.access || 'owner'));
 
-  const bulkDownload = async () => {
+  const bulkDownload = guard(async () => {
     setDownloadStats({ loadedBytes: 0, bytesPerSecond: 0 });
     try {
       await downloadZip([...selectedIds], setDownloadStats);
-    } catch (err) {
-      toast.push(err.message, 'error');
     } finally {
       setDownloadStats(null);
     }
-  };
-  const bulkTrash = async () => {
+  });
+  const bulkTrash = guard(async () => {
     const targets = selectedNodes;
     await Promise.all(targets.map((n) => api.patchNode(n.id, { trashed: true })));
     toast.push(`Moved ${targets.length} item(s) to trash`, 'success', 6000, {
       label: 'Undo',
-      onClick: async () => {
+      onClick: guard(async () => {
         await Promise.all(targets.map((n) => api.patchNode(n.id, { trashed: false })));
         refresh();
         refreshUsage();
-      },
+      }),
     });
     clearSelection();
     refresh();
     refreshUsage();
-  };
-  const bulkRestore = async () => {
+  });
+  const bulkRestore = guard(async () => {
     await Promise.all(selectedNodes.map((n) => api.patchNode(n.id, { trashed: false })));
     toast.push(`Restored ${selectedNodes.length} item(s)`, 'success');
     clearSelection();
     refresh();
     refreshUsage();
-  };
+  });
 
   const closeModal = () => setModal(null);
+  const onSharingChanged = useCallback(() => {
+    refreshRef.current();
+    setSharesRefreshKey((k) => k + 1);
+  }, []);
 
   const isAdmin = user?.isAdmin;
+  const uploadDisabled = view === 'browse' && !canUploadRole(folderAccess);
+  const target = uploadTarget();
+
+  const searchFiles = useCallback((q) => api.search(q).then((d) => d.items), []);
+
+  const mobileTitle =
+    view === 'browse'
+      ? breadcrumb[breadcrumb.length - 1]?.name || (folderAccess === 'owner' ? 'My Drive' : 'Shared with me')
+      : view === 'trash'
+      ? 'Trash'
+      : VIEW_TITLES[view];
 
   const paletteCommands = [
     { id: 'new-folder', label: 'New folder', run: () => setModal({ type: 'new-folder' }) },
@@ -422,6 +512,7 @@ export default function DrivePage() {
     { id: 'go-starred', label: 'Go to Starred', run: () => setView('starred') },
     { id: 'go-recent', label: 'Go to Recent', run: () => setView('recent') },
     { id: 'go-shared', label: 'Go to Shared with me', run: () => setView('shared-with-me') },
+    { id: 'go-shared-by-me', label: 'Go to Shared by me', run: () => setView('shared-by-me') },
     { id: 'go-trash', label: 'Go to Trash', run: () => setView('trash') },
     { id: 'settings', label: 'Open Settings', run: () => setModal({ type: 'settings' }) },
     { id: 'storage', label: 'Storage details', run: () => setModal({ type: 'storage' }) },
@@ -435,6 +526,18 @@ export default function DrivePage() {
     { id: 'logout', label: 'Log out', hint: user?.username, run: logout },
   ];
 
+  const navButton = (key, label) => (
+    <button
+      className={`side-nav-item ${view === key ? 'active' : ''}`}
+      onClick={() => {
+        setSearchQuery('');
+        setView(key);
+      }}
+    >
+      {label}
+    </button>
+  );
+
   return (
     <div
       className="app-shell"
@@ -443,26 +546,36 @@ export default function DrivePage() {
       onDragOver={onDragOver}
       onDrop={onDrop}
     >
-      <aside className="sidebar">
+      {navOpen && <div className="sidebar-backdrop" onClick={() => setNavOpen(false)} />}
+      <aside
+        className={`sidebar ${navOpen ? 'open' : ''}`}
+        onClickCapture={(e) => {
+          // Any choice made in the drawer closes it.
+          if (e.target.closest('button')) setNavOpen(false);
+        }}
+      >
         <div className="brand">☁️ Cloud Storage</div>
         <button
           className="btn btn-primary btn-block new-btn"
           onClick={() => setModal({ type: 'new-folder' })}
-          disabled={sharedMode && viewerRole === 'view'}
+          disabled={uploadDisabled}
+          title={uploadDisabled ? 'You can only view this folder' : undefined}
         >
           + New folder
         </button>
         <button
           className="btn btn-block"
           onClick={() => fileInputRef.current?.click()}
-          disabled={sharedMode && viewerRole === 'view'}
+          disabled={uploadDisabled}
+          title={uploadDisabled ? 'You can only view this folder' : undefined}
         >
           Upload files
         </button>
         <button
           className="btn btn-block"
           onClick={() => folderInputRef.current?.click()}
-          disabled={sharedMode && viewerRole === 'view'}
+          disabled={uploadDisabled}
+          title={uploadDisabled ? 'You can only view this folder' : undefined}
         >
           Upload folder
         </button>
@@ -472,7 +585,7 @@ export default function DrivePage() {
           multiple
           style={{ display: 'none' }}
           onChange={(e) => {
-            doUploadEntries(filesToEntries(e.target.files));
+            startUpload(filesToEntries(e.target.files));
             e.target.value = '';
           }}
         />
@@ -491,7 +604,7 @@ export default function DrivePage() {
           multiple
           style={{ display: 'none' }}
           onChange={(e) => {
-            doUploadEntries(filesToEntries(e.target.files));
+            startUpload(filesToEntries(e.target.files));
             e.target.value = '';
           }}
         />
@@ -499,50 +612,32 @@ export default function DrivePage() {
           ref={versionInputRef}
           type="file"
           style={{ display: 'none' }}
-          onChange={async (e) => {
+          onChange={(e) => {
             const file = e.target.files?.[0];
-            const target = versionTargetNode.current;
+            const node = versionTargetNode.current;
             e.target.value = '';
             versionTargetNode.current = null;
-            if (!file || !target) return;
-            try {
-              await uploadVersion(target.id, file);
-              toast.push(`Uploaded a new version of "${target.name}"`, 'success');
-              refresh();
-              refreshUsage();
-            } catch (err) {
-              toast.push(err.message, 'error');
-            }
+            if (!file || !node) return;
+            enqueue([{ file, targetLabel: `new version of “${node.name}”`, initBody: { replaceNodeId: node.id } }]);
           }}
         />
         <nav className="side-nav">
-          <button className={`side-nav-item ${view === 'browse' ? 'active' : ''}`} onClick={goRoot}>
+          <button className={`side-nav-item ${view === 'browse' && folderAccess === 'owner' ? 'active' : ''}`} onClick={goRoot}>
             My Drive
           </button>
+          {navButton('starred', 'Starred')}
+          {navButton('recent', 'Recent')}
           <button
-            className={`side-nav-item ${view === 'starred' ? 'active' : ''}`}
-            onClick={() => setView('starred')}
-          >
-            Starred
-          </button>
-          <button
-            className={`side-nav-item ${view === 'recent' ? 'active' : ''}`}
-            onClick={() => setView('recent')}
-          >
-            Recent
-          </button>
-          <button
-            className={`side-nav-item ${view === 'shared-with-me' ? 'active' : ''}`}
-            onClick={() => setView('shared-with-me')}
+            className={`side-nav-item ${view === 'shared-with-me' || (view === 'browse' && folderAccess !== 'owner') ? 'active' : ''}`}
+            onClick={() => {
+              setSearchQuery('');
+              setView('shared-with-me');
+            }}
           >
             Shared with me
           </button>
-          <button
-            className={`side-nav-item ${view === 'trash' ? 'active' : ''}`}
-            onClick={() => setView('trash')}
-          >
-            Trash
-          </button>
+          {navButton('shared-by-me', 'Shared by me')}
+          {navButton('trash', 'Trash')}
         </nav>
         <div className="sidebar-spacer" />
         {usage && (
@@ -600,14 +695,52 @@ export default function DrivePage() {
       </aside>
 
       <main className="content">
+        <div className="mobile-header">
+          <button className="icon-btn mobile-menu-btn" onClick={() => setNavOpen(true)} aria-label="Open menu">
+            ☰
+          </button>
+          <span className="mobile-title">{mobileTitle}</span>
+          <div className="mobile-new">
+            <button
+              className="btn btn-primary"
+              onClick={() => setNewMenuOpen((o) => !o)}
+              disabled={uploadDisabled}
+              aria-haspopup="menu"
+            >
+              + New
+            </button>
+            {newMenuOpen && (
+              <>
+                <div className="menu-dismiss" onClick={() => setNewMenuOpen(false)} />
+                <div className="row-menu mobile-new-menu" role="menu">
+                  {[
+                    ['New folder', () => setModal({ type: 'new-folder' })],
+                    ['Upload files', () => fileInputRef.current?.click()],
+                    ['Upload folder', () => folderInputRef.current?.click()],
+                  ].map(([label, run]) => (
+                    <button
+                      key={label}
+                      onClick={() => {
+                        setNewMenuOpen(false);
+                        run();
+                      }}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
         <div className="top-bar">
           {view === 'browse' && (
             <div className="breadcrumb">
               <button
                 className="link-btn"
-                onClick={() => (sharedMode ? setView('shared-with-me') : goRoot())}
+                onClick={() => (folderAccess !== 'owner' ? setView('shared-with-me') : goRoot())}
               >
-                {sharedMode ? 'Shared with me' : 'My Drive'}
+                {folderAccess !== 'owner' ? 'Shared with me' : 'My Drive'}
               </button>
               {breadcrumb.map((b) => (
                 <React.Fragment key={b.id}>
@@ -617,6 +750,12 @@ export default function DrivePage() {
                   </button>
                 </React.Fragment>
               ))}
+              {folderAccess !== 'owner' && (
+                <span className="badge" title={folderOwner ? `Owned by ${folderOwner}` : undefined}>
+                  {folderOwner ? `${folderOwner}'s · ` : ''}
+                  {folderAccess === 'view' ? 'view only' : folderAccess === 'upload' ? 'can add files' : 'can edit'}
+                </span>
+              )}
             </div>
           )}
           {view === 'trash' && (
@@ -629,19 +768,9 @@ export default function DrivePage() {
               )}
             </div>
           )}
-          {view === 'starred' && (
+          {VIEW_TITLES[view] && (
             <div className="breadcrumb">
-              <strong>Starred</strong>
-            </div>
-          )}
-          {view === 'recent' && (
-            <div className="breadcrumb">
-              <strong>Recent</strong>
-            </div>
-          )}
-          {view === 'shared-with-me' && (
-            <div className="breadcrumb">
-              <strong>Shared with me</strong>
+              <strong>{VIEW_TITLES[view]}</strong>
             </div>
           )}
           <input
@@ -656,21 +785,6 @@ export default function DrivePage() {
           />
         </div>
 
-        {uploadPct !== null && (
-          <div className="upload-progress">
-            <div className="upload-progress-label">
-              <span>Uploading… {Math.round(uploadPct * 100)}%</span>
-              <span>
-                {uploadStats?.bytesPerSecond > 0 && formatSpeed(uploadStats.bytesPerSecond)}
-                {uploadStats?.bytesPerSecond > 0 &&
-                  uploadStats.totalBytes > uploadStats.loadedBytes &&
-                  ` · ${formatDuration((uploadStats.totalBytes - uploadStats.loadedBytes) / uploadStats.bytesPerSecond)} left`}
-              </span>
-            </div>
-            <div className="upload-progress-fill" style={{ width: `${uploadPct * 100}%` }} />
-          </div>
-        )}
-
         {downloadStats && (
           <div className="upload-progress">
             <div className="upload-progress-label">
@@ -681,6 +795,12 @@ export default function DrivePage() {
           </div>
         )}
 
+        {view === 'trash' && items.length > 0 && usage?.trashAutoEmptyDays > 0 && (
+          <p className="muted small view-note">
+            Items in the trash are deleted forever after {usage.trashAutoEmptyDays} days.
+          </p>
+        )}
+
         {selectedIds.size > 0 && (
           <div className="selection-bar">
             <span>{selectedIds.size} selected</span>
@@ -689,17 +809,17 @@ export default function DrivePage() {
                 <button className="btn" onClick={bulkDownload}>
                   Download
                 </button>
-                {!sharedMode && (
+                {allSelectedOwned && (
                   <>
-                    <button className="btn" onClick={() => setModal({ type: 'bundle-share' })}>
-                      Share
+                    <button className="btn" onClick={() => setModal({ type: 'share', items: selectedNodes })}>
+                      Share…
                     </button>
                     <button className="btn" onClick={() => setModal({ type: 'bulk-move' })}>
                       Move
                     </button>
                   </>
                 )}
-                {canEditHere && (
+                {allSelectedEditable && (
                   <button className="btn btn-danger" onClick={bulkTrash}>
                     Move to trash
                   </button>
@@ -721,24 +841,19 @@ export default function DrivePage() {
           </div>
         )}
 
-        {dragActive && !internalDragActive && <div className="drop-overlay">Drop files to upload</div>}
+        {dragActive && !internalDragActive && (
+          <div className="drop-overlay">Drop files to upload to “{target.label}”</div>
+        )}
 
-        {loading ? (
+        {view === 'shared-by-me' ? (
+          <SharedByMe
+            refreshKey={sharesRefreshKey}
+            toast={toast}
+            onOpenItem={openItem}
+            onManage={(shareItems, bundle) => setModal({ type: 'share', items: shareItems, bundle })}
+          />
+        ) : loading && loadedKey !== viewKey ? (
           <div className="empty-state">Loading…</div>
-        ) : view === 'shared-with-me' ? (
-          <div className="shared-list">
-            {sharedFolders.length === 0 && (
-              <div className="empty-state">Nobody has shared a folder with you yet.</div>
-            )}
-            {sharedFolders.map((f) => (
-              <button key={f.id} className="shared-row" onClick={() => openSharedFolder(f)}>
-                <Icon category="folder" size={20} />
-                <span className="shared-row-name">{f.name}</span>
-                <span className="muted small">Shared by {f.ownerUsername}</span>
-                <span className="badge">{f.permission}</span>
-              </button>
-            ))}
-          </div>
         ) : (
           <ItemsList
             items={sortedItems}
@@ -750,29 +865,48 @@ export default function DrivePage() {
             onToggleSelectAll={toggleSelectAll}
             sortBy={sortBy}
             sortDir={sortDir}
-            onSortChange={view === 'browse' || view === 'starred' || view === 'recent' ? onSortChange : undefined}
-            onMoveItem={view === 'browse' && !sharedMode ? onMoveItem : undefined}
-            viewerRole={viewerRole}
+            onSortChange={view !== 'trash' ? onSortChange : undefined}
+            onMoveItem={view === 'browse' && canEditRole(folderAccess) ? onMoveItem : undefined}
+            emptyMessage={
+              view === 'browse' && canUploadRole(folderAccess)
+                ? 'This folder is empty - drop files here or use Upload.'
+                : EMPTY_MESSAGES[view]
+            }
           />
         )}
 
-        {view === 'browse' && hasMore && !loading && (
-          <button className="btn load-more-btn" onClick={loadMore} disabled={loadingMore}>
-            {loadingMore ? 'Loading…' : 'Load more'}
-          </button>
+        {view === 'browse' && hasMore && (
+          <div ref={loadMoreRef} className="load-more-sentinel">
+            <button className="btn load-more-btn" onClick={loadMore} disabled={loadingMore}>
+              {loadingMore ? 'Loading…' : 'Load more'}
+            </button>
+          </div>
         )}
       </main>
 
+      {conflictPrompt && (
+        <ConflictDialog
+          conflicts={conflictPrompt.conflicts}
+          canReplace={conflictPrompt.canReplace}
+          onDone={(decisions) => conflictPrompt.resolve(decisions)}
+          onCancel={() => {
+            conflictPrompt.resolve(null);
+            setConflictPrompt(null);
+          }}
+        />
+      )}
+
       {modal?.type === 'new-folder' && (
         <TextPromptModal
-          title="New folder"
+          title={view === 'browse' ? `New folder in “${target.label}”` : 'New folder in My Drive'}
           label="Folder name"
           confirmLabel="Create"
           onCancel={closeModal}
           onSubmit={async (name) => {
-            await api.createFolder(name, parentId);
+            await api.createFolder(name, target.parentId);
             closeModal();
-            refresh();
+            if (view === 'browse') refresh();
+            else goRoot();
           }}
         />
       )}
@@ -795,21 +929,21 @@ export default function DrivePage() {
       {modal?.type === 'move' && (
         <MoveModal
           title={`Move "${modal.node.name}"`}
-          excludeIds={new Set([modal.node.id])}
+          excludeIds={modal.excludeIds}
           onCancel={closeModal}
-          onMove={async (targetParentId) => {
+          onMove={guard(async (targetParentId) => {
             const previousParentId = modal.node.parentId;
             await api.patchNode(modal.node.id, { parentId: targetParentId });
             toast.push(`Moved "${modal.node.name}"`, 'success', 6000, {
               label: 'Undo',
-              onClick: async () => {
+              onClick: guard(async () => {
                 await api.patchNode(modal.node.id, { parentId: previousParentId });
                 refresh();
-              },
+              }),
             });
             closeModal();
             refresh();
-          }}
+          })}
         />
       )}
 
@@ -818,46 +952,49 @@ export default function DrivePage() {
           title={`Move ${selectedIds.size} items`}
           excludeIds={selectedIds}
           onCancel={closeModal}
-          onMove={async (targetParentId) => {
+          onMove={guard(async (targetParentId) => {
             const originalParents = selectedNodes.map((n) => ({ id: n.id, parentId: n.parentId }));
             await Promise.all(originalParents.map((n) => api.patchNode(n.id, { parentId: targetParentId })));
             toast.push(`Moved ${originalParents.length} item(s)`, 'success', 6000, {
               label: 'Undo',
-              onClick: async () => {
+              onClick: guard(async () => {
                 await Promise.all(originalParents.map((n) => api.patchNode(n.id, { parentId: n.parentId })));
                 refresh();
-              },
+              }),
             });
             clearSelection();
             closeModal();
             refresh();
-          }}
+          })}
         />
       )}
 
       {modal?.type === 'share' && (
-        <ShareModal node={modal.node} onChanged={refresh} onClose={() => { closeModal(); refresh(); }} />
+        <ShareDialog items={modal.items} bundle={modal.bundle} onChanged={onSharingChanged} onClose={closeModal} />
       )}
 
-      {modal?.type === 'bundle-share' && (
-        <BundleShareModal nodeIds={[...selectedIds]} onClose={closeModal} />
+      {modal?.type === 'preview' && (
+        <PreviewModal
+          node={modal.node}
+          siblings={fileSiblings}
+          onNavigate={(node) => setModal({ type: 'preview', node })}
+          onClose={closeModal}
+        />
       )}
-
-      {modal?.type === 'preview' && <PreviewModal node={modal.node} onClose={closeModal} />}
 
       {modal?.type === 'delete-forever' && (
         <ConfirmDialog
           title="Delete forever"
-          message={`Permanently delete "${modal.node.name}"? This can't be undone.`}
+          message={`Permanently delete "${modal.node.name}"${modal.node.type === 'folder' ? ' and everything in it' : ''}? This can't be undone.`}
           confirmLabel="Delete forever"
           danger
           onCancel={closeModal}
-          onConfirm={async () => {
+          onConfirm={guard(async () => {
             await api.deleteNode(modal.node.id);
             closeModal();
             refresh();
             refreshUsage();
-          }}
+          })}
         />
       )}
 
@@ -868,13 +1005,13 @@ export default function DrivePage() {
           confirmLabel="Delete forever"
           danger
           onCancel={closeModal}
-          onConfirm={async () => {
+          onConfirm={guard(async () => {
             await Promise.all(selectedNodes.map((n) => api.deleteNode(n.id)));
             clearSelection();
             closeModal();
             refresh();
             refreshUsage();
-          }}
+          })}
         />
       )}
 
@@ -885,12 +1022,12 @@ export default function DrivePage() {
           confirmLabel="Empty trash"
           danger
           onCancel={closeModal}
-          onConfirm={async () => {
+          onConfirm={guard(async () => {
             await api.emptyTrash();
             closeModal();
             refresh();
             refreshUsage();
-          }}
+          })}
         />
       )}
 
@@ -904,17 +1041,13 @@ export default function DrivePage() {
         <VersionHistoryModal node={modal.node} onChanged={refresh} onClose={closeModal} />
       )}
 
-      {modal?.type === 'comments' && (
-        <CommentsModal node={modal.node} onChanged={refresh} onClose={closeModal} />
-      )}
-
-      {modal?.type === 'access' && <AccessModal node={modal.node} onClose={closeModal} />}
+      {modal?.type === 'comments' && <CommentsModal node={modal.node} onChanged={refresh} onClose={closeModal} />}
 
       <CommandPalette
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}
         commands={paletteCommands}
-        onSearch={(q) => api.search(q).then((d) => d.items)}
+        onSearch={searchFiles}
         onSelectFile={openItem}
       />
     </div>

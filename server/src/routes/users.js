@@ -4,6 +4,7 @@ const uuid = crypto.randomUUID;
 import { getState, save, findUserByUsername, allOwnedBy, logActivity } from '../store.js';
 import { requireAuth, requireAdmin, requireFetchHeader, hashPassword } from '../auth.js';
 import { defaultPreferences } from '../lib/preferences.js';
+import { transferOwnedData } from '../lib/accountCleanup.js';
 
 const router = Router();
 
@@ -97,16 +98,19 @@ router.delete('/:id', requireFetchHeader, requireAuth, requireAdmin, (req, res) 
   const idx = state.users.findIndex((u) => u.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'User not found' });
   const [removedUser] = state.users.splice(idx, 1);
+  // Their files aren't deleted as a side effect of removing the account -
+  // they move into a "From <username>" folder in the removing admin's
+  // drive. Every link and bit of people access involving them is revoked.
+  const folder = transferOwnedData([removedUser.id], req.user, `From ${removedUser.username}`);
   logActivity({
     userId: req.user.id,
     username: req.user.username,
     action: 'delete_user',
     targetName: removedUser.username,
+    details: folder ? `files moved to "${folder.name}"` : null,
   });
-  // Leave that user's files/blobs in place on disk rather than silently
-  // deleting someone's data as a side effect of an account removal.
   save();
-  res.json({ ok: true });
+  res.json({ ok: true, transferredTo: folder ? folder.name : null });
 });
 
 export default router;

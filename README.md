@@ -261,13 +261,23 @@ Open `http://localhost:5173`.
   disk are named by a random id, decoupled from the user-visible name/path.
 - Trash is soft-delete; "Empty trash" / "Delete forever" is what actually
   removes files from disk.
-- Files and folders can both be shared via unguessable link tokens, with
-  optional expiry and password protection. A shared folder gets a
-  read-only public browsing view (list contents, download individual
-  files, download the whole thing as a zip); access is confined
-  server-side to that folder's own subtree. Revoke a link any time from
-  the item's menu.
-- Multi-select supports bulk download (as a zip), move, and trash/restore/
-  delete-forever. Double-clicking a file opens an in-browser preview for
-  images, video, audio, PDFs, and text files where possible; the kebab
-  menu's "Download" always does a direct download instead.
+- All sharing lives in one **Share…** dialog per item (or per
+  multi-selection): add specific people by username (can view / can add
+  files / can edit), and/or turn on a public link with optional expiry,
+  password, and - for folders - visitor uploads. **Shared by me** lists
+  every link and every person you've shared with, with one-click
+  settings/turn off. A public link's access is confined server-side to
+  that item's own subtree, and password guesses are rate-limited.
+- Uploads are resumable (chunked) and go through an upload panel showing
+  each file's progress, with cancel and retry. Uploading a name that's
+  already taken asks whether to replace it (the old copy goes into
+  version history), keep both (`name (1).ext`), or skip.
+- Trashing a folder shows up as one item in Trash; restoring it brings
+  back exactly what it took. Deleting a user moves their files into a
+  "From <username>" folder in the deleting admin's drive and revokes
+  everything they shared.
+- Multi-select supports bulk download (as a zip), share, move, and
+  trash/restore/delete-forever. Double-clicking a file (a single tap on a
+  phone/tablet) opens an in-browser preview for images, video, audio, PDFs,
+  and text files where possible; the ⋮ menu's "Download" always does a
+  direct download instead.

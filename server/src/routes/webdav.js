@@ -14,13 +14,16 @@ import {
   allOwnedBy,
   logActivity,
 } from '../store.js';
-import { verifyPassword } from '../auth.js';
+import { verifyPasswordAsync } from '../auth.js';
 import { blobPath, diskUsage } from '../lib/paths.js';
-import { isSelfOrDescendantMove, descendantsOf } from '../lib/tree.js';
+import { isSelfOrDescendantMove } from '../lib/tree.js';
 import { extractText } from '../lib/textExtract.js';
 import { parsePathSegments, resolveNode, resolveParentId } from '../lib/webdavPath.js';
-import { multistatus, nodePropResponse, lockResponse } from '../lib/webdavXml.js';
-import { maybeGenerateThumbnail, sanitizeName } from './nodes.js';
+import { multistatus, nodePropResponse, lockResponse, proppatchResponse } from '../lib/webdavXml.js';
+import { trashNode } from '../lib/trash.js';
+import { maybeGenerateThumbnail, replaceFileContent } from '../lib/versions.js';
+import { sanitizeName, uniqueName } from '../lib/names.js';
+import { streamFile } from './nodes.js';
 
 const router = Router();
 
@@ -28,7 +31,40 @@ const router = Router();
 // Server", rclone, Cyberduck, ...) authenticate with HTTP Basic Auth on
 // every request rather than a session cookie - this only carries real
 // protection over HTTPS, same as any Basic Auth endpoint.
-function requireBasicAuth(req, res, next) {
+//
+// A mounted drive fires off requests constantly (Explorer re-lists
+// folders, probes for desktop.ini/thumbs, ...), and a bcrypt check costs a
+// few hundred ms of CPU each - so a credential that already checked out is
+// remembered (keyed by a hash of the header, never the password itself)
+// for a few minutes instead of being re-verified on every single request.
+const AUTH_CACHE_MS = 10 * 60 * 1000;
+const authCache = new Map(); // sha256(header) -> { userId, passwordHash, expiresAt }
+
+// Wrong-password attempts per IP, so the WebDAV endpoint can't be used to
+// brute-force an account's password (the login page has its own limiter).
+const FAILURE_WINDOW_MS = 15 * 60 * 1000;
+const MAX_FAILURES = 20;
+const failures = new Map(); // ip -> { count, resetAt }
+
+function tooManyFailures(ip) {
+  const entry = failures.get(ip);
+  if (!entry) return false;
+  if (Date.now() > entry.resetAt) {
+    failures.delete(ip);
+    return false;
+  }
+  return entry.count >= MAX_FAILURES;
+}
+
+function recordFailure(ip) {
+  const now = Date.now();
+  const entry = failures.get(ip);
+  if (!entry || now > entry.resetAt) failures.set(ip, { count: 1, resetAt: now + FAILURE_WINDOW_MS });
+  else entry.count += 1;
+  if (failures.size > 10000) failures.clear();
+}
+
+async function requireBasicAuth(req, res, next) {
   const header = req.headers.authorization || '';
   const match = /^Basic\s+(.+)$/i.exec(header);
   const challenge = () => {
@@ -36,6 +72,23 @@ function requireBasicAuth(req, res, next) {
     return res.status(401).send('Authentication required');
   };
   if (!match) return challenge();
+
+  const cacheKey = crypto.createHash('sha256').update(match[1]).digest('hex');
+  const cached = authCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    const user = findUserById(cached.userId);
+    // A password change (new hash) or deleted account invalidates it.
+    if (user && user.passwordHash === cached.passwordHash) {
+      req.user = user;
+      return next();
+    }
+  }
+  authCache.delete(cacheKey);
+
+  if (tooManyFailures(req.ip)) {
+    res.setHeader('Retry-After', '900');
+    return res.status(429).send('Too many failed sign-in attempts - try again in 15 minutes');
+  }
 
   let decoded;
   try {
@@ -48,8 +101,14 @@ function requireBasicAuth(req, res, next) {
   const username = decoded.slice(0, sep);
   const password = decoded.slice(sep + 1);
   const user = findUserByUsername(username);
-  if (!user || !verifyPassword(password, user.passwordHash)) return challenge();
+  const ok = user ? await verifyPasswordAsync(password, user.passwordHash) : false;
+  if (!ok) {
+    recordFailure(req.ip);
+    return challenge();
+  }
 
+  if (authCache.size > 1000) authCache.clear();
+  authCache.set(cacheKey, { userId: user.id, passwordHash: user.passwordHash, expiresAt: Date.now() + AUTH_CACHE_MS });
   req.user = user;
   next();
 }
@@ -64,11 +123,19 @@ router.use((req, res, next) => {
 // PROPFIND/LOCK requests often carry an XML body this server ignores (see
 // the handlers below) - it still has to be drained so the client isn't
 // left waiting on a request the server never finished reading.
+const XML_BODY_METHODS = new Set(['PROPFIND', 'PROPPATCH', 'LOCK']);
 router.use((req, res, next) => {
-  if (req.method !== 'PROPFIND' && req.method !== 'LOCK') return next();
+  if (!XML_BODY_METHODS.has(req.method)) return next();
   const chunks = [];
-  req.on('data', (c) => chunks.push(c));
-  req.on('end', next);
+  let size = 0;
+  req.on('data', (c) => {
+    size += c.length;
+    if (size <= 1024 * 1024) chunks.push(c);
+  });
+  req.on('end', () => {
+    req.xmlBody = Buffer.concat(chunks).toString('utf-8');
+    next();
+  });
   req.on('error', next);
 });
 
@@ -82,7 +149,7 @@ function hrefFor(segments, isCollection) {
 }
 
 router.options('*', (req, res) => {
-  res.setHeader('Allow', 'OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, MKCOL, COPY, MOVE, LOCK, UNLOCK');
+  res.setHeader('Allow', 'OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, LOCK, UNLOCK');
   res.status(200).end();
 });
 
@@ -126,17 +193,15 @@ router.propfind('*', async (req, res) => {
   res.status(207).type('application/xml; charset=utf-8').send(multistatus(entries));
 });
 
+// Range requests are honoured (via the same streamer the web app uses) so
+// seeking in a video opened straight off the mounted drive doesn't have to
+// pull the whole file down first.
 router.get('*', (req, res) => {
   const segments = segmentsFromReq(req);
   const node = resolveNode(req.user.id, segments);
   if (!node || node.type !== 'file') return res.status(404).send('Not found');
-  fs.stat(blobPath(node.blobName), (err, stat) => {
-    if (err) return res.status(404).send('File missing on disk');
-    res.setHeader('Content-Type', node.mimeType || 'application/octet-stream');
-    res.setHeader('Content-Length', stat.size);
-    res.setHeader('Last-Modified', new Date(node.updatedAt || node.createdAt).toUTCString());
-    fs.createReadStream(blobPath(node.blobName)).pipe(res);
-  });
+  res.setHeader('Last-Modified', new Date(node.updatedAt || node.createdAt).toUTCString());
+  streamFile(req, res, node);
 });
 
 router.head('*', (req, res) => {
@@ -164,6 +229,15 @@ router.put('*', async (req, res) => {
   const existing = resolveNode(ownerId, segments);
   if (existing && existing.type === 'folder') return res.status(409).send('A folder already exists at that path');
 
+  // Refuse an obviously over-quota upload before reading gigabytes of it.
+  const declaredLength = parseInt(req.headers['content-length'], 10);
+  if (owner?.quotaBytes && Number.isFinite(declaredLength)) {
+    const currentlyUsed = allOwnedBy(ownerId)
+      .filter((n) => n.type === 'file' && !n.trashed && n.id !== existing?.id)
+      .reduce((sum, n) => sum + (n.size || 0), 0);
+    if (currentlyUsed + declaredLength > owner.quotaBytes) return res.status(507).send('Storage quota exceeded');
+  }
+
   const blobName = crypto.randomUUID();
   const dest = fs.createWriteStream(blobPath(blobName));
   try {
@@ -185,7 +259,7 @@ router.put('*', async (req, res) => {
       .reduce((sum, n) => sum + (n.size || 0), 0);
     if (currentlyUsed + stat.size > owner.quotaBytes) {
       await fsp.unlink(blobPath(blobName)).catch(() => {});
-      return res.status(413).send('Storage quota exceeded');
+      return res.status(507).send('Storage quota exceeded');
     }
   }
 
@@ -194,22 +268,12 @@ router.put('*', async (req, res) => {
   const state = getState();
 
   if (existing) {
-    // Overwriting an existing file - old blob/thumbnail are replaced, not
-    // kept as a version; WebDAV clients expect PUT to just replace content.
-    const oldBlobName = existing.blobName;
-    const oldThumbnailBlobName = existing.thumbnailBlobName;
-    existing.blobName = blobName;
-    existing.size = stat.size;
-    existing.mimeType = mimeType;
-    existing.updatedAt = now;
-    const contentText = await extractText(blobPath(blobName), { mimeType, name, size: stat.size });
-    if (contentText) existing.contentText = contentText;
-    else delete existing.contentText;
-    const thumbnailBlobName = await maybeGenerateThumbnail(mimeType, blobPath(blobName));
-    if (thumbnailBlobName) existing.thumbnailBlobName = thumbnailBlobName;
-    else delete existing.thumbnailBlobName;
-    if (oldBlobName) await fsp.unlink(blobPath(oldBlobName)).catch(() => {});
-    if (oldThumbnailBlobName) await fsp.unlink(blobPath(oldThumbnailBlobName)).catch(() => {});
+    // Saving over a file from the mounted drive keeps what was there as a
+    // version (restorable from the web app's Version history), same as a
+    // replace done in the browser - except an empty placeholder, which
+    // Windows creates with a 0-byte PUT right before sending the real
+    // content, and isn't worth a history slot.
+    await replaceFileContent(existing, { blobName, size: stat.size, mimeType }, { keepVersion: (existing.size || 0) > 0 });
     logActivity({ userId: ownerId, username: req.user.username, action: 'upload', targetName: name, details: 'via WebDAV' });
     await save();
     return res.status(204).end();
@@ -275,13 +339,7 @@ router.delete('*', async (req, res) => {
   // Soft-delete (same as the regular app's trash), not an immediate purge -
   // recoverable from Trash rather than a WebDAV client being able to
   // silently cause unrecoverable data loss.
-  const now = Date.now();
-  node.trashed = true;
-  node.trashedAt = now;
-  for (const d of descendantsOf(node.id)) {
-    d.trashed = true;
-    d.trashedAt = now;
-  }
+  trashNode(node);
   logActivity({ userId: ownerId, username: req.user.username, action: 'trash', targetName: node.name, details: 'via WebDAV' });
   await save();
   res.status(204).end();
@@ -315,15 +373,14 @@ router.move('*', async (req, res) => {
     return res.status(409).send("Can't move a folder into itself");
   }
 
-  const destExisting = resolveNode(ownerId, destSegments);
+  // Names match case-insensitively (like Windows itself), so renaming
+  // "a.txt" to "A.txt" resolves the destination to the very same item -
+  // that's a rename, not an overwrite of something else.
+  const found = resolveNode(ownerId, destSegments);
+  const destExisting = found && found.id !== node.id ? found : null;
   if (destExisting) {
     if (req.headers.overwrite === 'F') return res.status(412).send('Destination exists');
-    destExisting.trashed = true;
-    destExisting.trashedAt = Date.now();
-    for (const d of descendantsOf(destExisting.id)) {
-      d.trashed = true;
-      d.trashedAt = Date.now();
-    }
+    trashNode(destExisting);
   }
 
   node.name = sanitizeName(destSegments[destSegments.length - 1]);
@@ -350,10 +407,10 @@ router.copy('*', async (req, res) => {
   if (destParentId === undefined) return res.status(409).send('Destination folder does not exist');
 
   const destExisting = resolveNode(ownerId, destSegments);
+  if (destExisting && destExisting.id === node.id) return res.status(403).send('Source and destination are the same');
   if (destExisting) {
     if (req.headers.overwrite === 'F') return res.status(412).send('Destination exists');
-    destExisting.trashed = true;
-    destExisting.trashedAt = Date.now();
+    trashNode(destExisting);
   }
 
   const newBlobName = crypto.randomUUID();
@@ -368,7 +425,7 @@ router.copy('*', async (req, res) => {
     size: node.size,
     mimeType: node.mimeType,
     blobName: newBlobName,
-    contentText: node.contentText,
+    ...(node.contentText ? { contentText: node.contentText } : {}),
     trashed: false,
     trashedAt: null,
     createdAt: now,
@@ -377,6 +434,20 @@ router.copy('*', async (req, res) => {
   getState().nodes.push(copy);
   await save();
   res.status(destExisting ? 204 : 201).end();
+});
+
+// Clients set their own metadata this way (Windows sends its file
+// timestamps/attributes right after every copy). Nothing here stores
+// arbitrary properties, but answering "done" rather than 405 matters:
+// Windows reports the whole copy as failed if this step errors.
+router.proppatch('*', (req, res) => {
+  const segments = segmentsFromReq(req);
+  const node = segments.length ? resolveNode(req.user.id, segments) : { type: 'folder' };
+  if (!node) return res.status(404).send('Not found');
+  res
+    .status(207)
+    .type('application/xml; charset=utf-8')
+    .send(proppatchResponse(hrefFor(segments, node.type === 'folder'), req.xmlBody || ''));
 });
 
 // Fabricated, non-exclusive locking - see lib/webdavXml.js. Real enough to
