@@ -53,37 +53,10 @@ function TextPreview({ node }) {
 
 export default function PreviewModal({ node, onClose }) {
   const category = mimeCategory(node);
-  // A short-lived token appended to the media/download URLs, so an OS-level
-  // save flow (notably iOS Safari's native "Save Video" on the <video>
-  // player) can fetch the file on its own, outside the page's cookie jar,
-  // instead of silently failing or saving an unauthenticated error response.
-  const [mediaToken, setMediaToken] = useState(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    api
-      .getMediaToken(node.id)
-      .then(({ token }) => !cancelled && setMediaToken(token))
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [node.id]);
-
-  const withToken = (base) => (mediaToken ? `${base}${base.includes('?') ? '&' : '?'}token=${mediaToken}` : base);
-  const url = withToken(api.previewUrl(node.id));
-  const downloadHref = withToken(api.downloadUrl(node.id));
-
-  const needsToken = category === 'image' || category === 'video' || category === 'audio' || category === 'pdf';
+  const url = api.previewUrl(node.id);
 
   let body;
-  if (needsToken && !mediaToken) {
-    // Held back until the token resolves (usually near-instant) rather
-    // than starting playback on a cookie-only URL and then swapping the
-    // `src` out from under it once the token arrives, which would restart
-    // whatever had already started playing.
-    body = <p className="muted">Loading preview…</p>;
-  } else if (category === 'image') {
+  if (category === 'image') {
     body = <img className="preview-media" src={url} alt={node.name} />;
   } else if (category === 'video') {
     body = (
@@ -113,7 +86,7 @@ export default function PreviewModal({ node, onClose }) {
       width={category === 'image' || category === 'video' ? 720 : 560}
       footer={
         <>
-          <a className="btn" href={downloadHref}>
+          <a className="btn" href={api.downloadUrl(node.id)}>
             Download
           </a>
           <button className="btn btn-primary" onClick={onClose}>
